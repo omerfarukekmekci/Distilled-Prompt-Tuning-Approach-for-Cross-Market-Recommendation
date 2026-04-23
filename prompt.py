@@ -83,14 +83,16 @@ class PromptModule(nn.Module):
         # PROMPT BANKS
         # ------------------------------------------------------------------
         # Each bank is a learnable (n_prompts, embed_dim) matrix.
-        # We initialise with small random values so initial prompts are
-        # near-zero (the model starts close to the pre-trained behaviour).
+        # We initialise with moderate random values (0.1) so that prompts
+        # are large enough to actually influence the dot-product ranking
+        # from the start.  Too small (0.01) and the prompts are invisible
+        # relative to backbone embeddings of magnitude ~1.0.
         # ------------------------------------------------------------------
         self.user_prompt_bank = nn.Parameter(
-            torch.randn(n_prompts, embed_dim) * 0.01
+            torch.randn(n_prompts, embed_dim) * 0.1
         )
         self.item_prompt_bank = nn.Parameter(
-            torch.randn(n_prompts, embed_dim) * 0.01
+            torch.randn(n_prompts, embed_dim) * 0.1
         )
 
         # ------------------------------------------------------------------

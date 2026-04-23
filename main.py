@@ -54,7 +54,7 @@ from trainer import PreTrainer, TeacherTrainer, StudentTrainer
 # EASY-ACCESS DEFAULTS  (modify these to avoid typing CLI args)
 # =====================================================================
 DEFAULT_PRETRAIN_EPOCHS  = 100
-DEFAULT_TEACHER_EPOCHS   = 100
+DEFAULT_TEACHER_EPOCHS   = 150
 DEFAULT_STUDENT_EPOCHS   = 50
 DEFAULT_EVAL_EVERY       = 10
 
@@ -178,8 +178,9 @@ def parse_args():
     # ---- Student training ----
     parser.add_argument("--student_epochs", type=int, default=DEFAULT_STUDENT_EPOCHS,
                         help="Epochs for student prompt training")
-    parser.add_argument("--student_lr", type=float, default=1e-3,
-                        help="Learning rate for student (prompts only)")
+    parser.add_argument("--student_lr", type=float, default=1e-2,
+                        help="Learning rate for student (prompts only, "
+                             "higher than backbone because prompts are small)")
     parser.add_argument("--student_batch", type=int, default=256,
                         help="Batch size for student (smaller because "
                              "we compute full score matrices)")

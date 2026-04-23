@@ -174,7 +174,7 @@ class PreTrainer:
             avg_loss = self.train_epoch(batch_size)
             epoch_time = time.time() - t0
 
-            if verbose and (epoch % 2 == 0):
+            if verbose and (epoch % 10 == 0 or epoch == 1):
                 print(f"  [PreTrain] Epoch {epoch:3d}/{n_epochs}  "
                       f"Loss: {avg_loss:.4f}  "
                       f"({epoch_time:.1f}s/epoch)")
@@ -276,7 +276,7 @@ class TeacherTrainer:
             avg_loss = self.train_epoch(batch_size)
             epoch_time = time.time() - t0
 
-            if verbose and (epoch % 5 == 0 or epoch == 1):
+            if verbose and (epoch % 10 == 0 or epoch == 1):
                 print(f"  [Teacher]  Epoch {epoch:3d}/{n_epochs}  "
                       f"Loss: {avg_loss:.4f}  "
                       f"({epoch_time:.1f}s/epoch)")
@@ -529,13 +529,13 @@ class StudentTrainer:
             avg_loss = self.train_epoch(batch_size)
             epoch_time = time.time() - t0
 
-            if verbose and (epoch % 5 == 0 or epoch == 1):
+            if verbose and (epoch % 10 == 0 or epoch == 1):
                 print(f"  [Student]  Epoch {epoch:3d}/{n_epochs}  "
                       f"Loss: {avg_loss:.4f}  "
                       f"({epoch_time:.1f}s/epoch)")
 
             # Periodic validation
-            if val_dict and epoch % eval_every == 0:
+            if val_dict and epoch % 10 == 0:
                 metrics = evaluate_model(
                     self.backbone, self.adj, val_dict, self.n_items,
                     k_list, train_interactions=train_interactions,
