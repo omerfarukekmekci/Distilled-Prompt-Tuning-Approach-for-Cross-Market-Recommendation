@@ -53,10 +53,10 @@ from trainer import PreTrainer, TeacherTrainer, StudentTrainer
 # =====================================================================
 # EASY-ACCESS DEFAULTS  (modify these to avoid typing CLI args)
 # =====================================================================
-DEFAULT_PRETRAIN_EPOCHS  = 10 # all of these were 10 times higher
-DEFAULT_TEACHER_EPOCHS   = 10
-DEFAULT_STUDENT_EPOCHS   = 5
-DEFAULT_EVAL_EVERY       = 1
+DEFAULT_PRETRAIN_EPOCHS  = 100
+DEFAULT_TEACHER_EPOCHS   = 100
+DEFAULT_STUDENT_EPOCHS   = 50
+DEFAULT_EVAL_EVERY       = 10
 
 
 # =====================================================================

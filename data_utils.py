@@ -41,19 +41,45 @@ import torch
 # 1.  LOAD RAW MARKET DATA
 # ---------------------------------------------------------------------------
 
-def load_market_data(path: str) -> pd.DataFrame:
+def k_core_filter(df: pd.DataFrame, k: int = 5) -> pd.DataFrame:
     """
-    Read one XMRec ratings file.
+    Recursively filter users and items with strictly less than `k` interactions.
+    This shrinks massive, ultra-sparse networks down to their informative core
+    and dramatically speeds up training.
+    """
+    if k <= 1:
+        return df
+
+    while True:
+        start_len = len(df)
+        user_counts = df["userId"].value_counts()
+        item_counts = df["itemId"].value_counts()
+
+        valid_users = user_counts[user_counts >= k].index
+        valid_items = item_counts[item_counts >= k].index
+
+        df = df[df["userId"].isin(valid_users) & df["itemId"].isin(valid_items)]
+
+        if len(df) == start_len:
+            break
+
+    return df
+
+
+def load_market_data(path: str, k_core: int = 5) -> pd.DataFrame:
+    """
+    Read one XMRec ratings file and apply k-core filtering.
 
     Parameters
     ----------
     path : str
         Path to a ratings file.  Can be plain .txt or gzipped .txt.gz.
+    k_core : int  – Minimum interactions per user/item (default: 5).
 
     Returns
     -------
     pd.DataFrame
-        Columns: userId (str), itemId (str), rating (float), date (str).
+        Columns: userId (str), itemId (str), rating (float), timestamp (float).
 
     Why string IDs?
     ----------------
@@ -61,17 +87,11 @@ def load_market_data(path: str) -> pd.DataFrame:
     and ASINs).  We keep them as strings here and remap them to integers in
     `build_global_id_maps`.
     """
-    # Detect compression automatically from the file extension
-    compression = "gzip" if path.endswith(".gz") else None
-
     df = pd.read_csv(
-        path,
-        sep=" ",
-        header=None,
-        names=["userId", "itemId", "rating", "date"],
-        compression=compression,
-        dtype={"userId": str, "itemId": str},  # keep IDs as strings
+        path, sep=r'\s+', names=["userId", "itemId", "rating", "timestamp"],
+        dtype={"userId": str, "itemId": str, "rating": float, "timestamp": str}
     )
+    df = k_core_filter(df, k=k_core)
     return df
 
 
@@ -185,7 +205,9 @@ def build_adj_matrix(interactions: list, n_users: int, n_items: int):
     # ---- Step C: convert to PyTorch sparse tensor ----
     indices = torch.LongTensor(np.stack([adj_norm.row, adj_norm.col]))
     values  = torch.FloatTensor(adj_norm.data)
-    adj_tensor = torch.sparse_coo_tensor(indices, values, torch.Size([n_nodes, n_nodes]))
+    adj_tensor = torch.sparse_coo_tensor(
+        indices, values, torch.Size([n_nodes, n_nodes])
+    ).coalesce()  # Critical for matrix multiplication performance
 
     return adj_tensor
 

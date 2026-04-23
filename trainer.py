@@ -112,14 +112,21 @@ class PreTrainer:
         total_loss_val = 0.0
         n_batches = 0
 
+        # -------------------------------------------------------------
+        # PERFORMANCE FIX: Compute full-graph embeddings ONCE per epoch.
+        # Computing sparse matmuls inside the batch loop makes training
+        # pathologically slow. We compute once, and use retain_graph=True
+        # when backpropagating. We also enforce a large batch size on
+        # CPU to minimize the number of backward sparse-matmuls.
+        # -------------------------------------------------------------
+        batch_size = max(batch_size, 262144)
+        user_emb, item_emb = self.model(self.adj)
+
         for start in range(0, len(triplets), batch_size):
             batch = triplets[start : start + batch_size]
             users = torch.LongTensor([t[0] for t in batch]).to(self.device)
             pos_items = torch.LongTensor([t[1] for t in batch]).to(self.device)
             neg_items = torch.LongTensor([t[2] for t in batch]).to(self.device)
-
-            # Forward pass: get all embeddings
-            user_emb, item_emb = self.model(self.adj)
 
             # Look up embeddings for this batch
             u_emb = user_emb[users]           # (batch, dim)
@@ -130,14 +137,20 @@ class PreTrainer:
             pos_scores = (u_emb * pos_emb).sum(dim=-1)
             neg_scores = (u_emb * neg_emb).sum(dim=-1)
 
-            # BPR loss + L2 regularisation on active embeddings
+            # BPR loss + L2 regularisation on active base embeddings
             loss = bpr_loss(pos_scores, neg_scores)
             reg = self.model.reg_loss(users, pos_items) * 1e-4
 
             total = loss + reg
 
             self.optimizer.zero_grad()
-            total.backward()
+            
+            # Since multiple batches backpropagate through the same
+            # single forward graph, we must retain the graph until
+            # the final batch of the epoch.
+            retain = (start + batch_size < len(triplets))
+            total.backward(retain_graph=retain)
+            
             self.optimizer.step()
 
             total_loss_val += total.item()
@@ -224,13 +237,15 @@ class TeacherTrainer:
         total_loss_val = 0.0
         n_batches = 0
 
+        # PERFORMANCE FIX: Compute full-graph embeddings ONCE per epoch
+        batch_size = max(batch_size, 262144)
+        user_emb, item_emb = self.model(self.adj)
+
         for start in range(0, len(triplets), batch_size):
             batch = triplets[start : start + batch_size]
             users = torch.LongTensor([t[0] for t in batch]).to(self.device)
             pos_items = torch.LongTensor([t[1] for t in batch]).to(self.device)
             neg_items = torch.LongTensor([t[2] for t in batch]).to(self.device)
-
-            user_emb, item_emb = self.model(self.adj)
 
             u_emb = user_emb[users]
             pos_emb = item_emb[pos_items]
@@ -367,22 +382,9 @@ class StudentTrainer:
         # used for sampling batches during distillation.
         self.train_users = list(self.user_pos.keys())
 
-    def train_epoch(self, batch_size: int = 256):
+    def train_epoch(self, batch_size: int = 1024):
         """
-        One epoch of student (prompt) training.
-
-        The flow per batch:
-        1.  Forward the frozen backbone → get base embeddings.
-        2.  Inject prompts → get student embeddings.
-        3.  Forward the frozen teacher → get teacher embeddings.
-        4.  Compute L_BPR on (user, pos, neg) triplets.
-        5.  Compute L_WRD on full user×item score matrices (student vs teacher).
-        6.  Compute L_AMRDD on full score matrices with observed/unobserved masks.
-        7.  Combine and backprop through prompt parameters only.
-
-        Returns
-        -------
-        avg_loss : float
+        Train the PromptModule (frozen backbone, frozen teacher).
         """
         self.prompt_module.train()
 
@@ -391,37 +393,42 @@ class StudentTrainer:
         total_loss_val = 0.0
         n_batches = 0
 
+        # -------------------------------------------------------------
+        # PERFORMANCE FIX: Backbone and Teacher are completely frozen!
+        # Do not recalculate the graph propagation inside the batch loop.
+        # We compute them exactly once per epoch.
+        # -------------------------------------------------------------
+        with torch.no_grad():
+            base_user_emb, base_item_emb = self.backbone(self.adj)
+            teacher_user_emb, teacher_item_emb = self.teacher(self.adj)
+
+        # Batch size can be moderate here because we evaluate Full WRD
+        batch_size = max(batch_size, 1024)
+
         for start in range(0, len(self.train_users), batch_size):
             batch_users = self.train_users[start : start + batch_size]
             user_ids = torch.LongTensor(batch_users).to(self.device)
 
-            # ----------------------------------------------------------
-            # Step 1:  Backbone forward (no grad — frozen)
-            # ----------------------------------------------------------
-            with torch.no_grad():
-                base_user_emb, base_item_emb = self.backbone(self.adj)
+            # 1. Base batch users
+            batch_base_user = base_user_emb[user_ids]
 
-            # ----------------------------------------------------------
-            # Step 2:  Inject prompts (grad flows through prompt module)
-            # ----------------------------------------------------------
-            student_user_emb, student_item_emb = self.prompt_module(
-                base_user_emb, base_item_emb
+            # 2. Inject prompts
+            # We ONLY compute user prompts for this batch's users! Saves
+            # allocating/processing 3M+ user prompts needlessly.
+            # We do need prompts for ALL items for the WRD/AMRDD distillation matrices.
+            batch_student_user, student_item_emb = self.prompt_module(
+                batch_base_user, base_item_emb
             )
 
-            # ----------------------------------------------------------
-            # Step 3:  Teacher forward (no grad)
-            # ----------------------------------------------------------
-            with torch.no_grad():
-                teacher_user_emb, teacher_item_emb = self.teacher(self.adj)
+            # 3. Teacher batch users
+            batch_teacher_user = teacher_user_emb[user_ids]
 
             # ----------------------------------------------------------
-            # Step 4:  BPR Loss
+            # BPR Loss (Iterating locally helps indexing on Python side)
             # ----------------------------------------------------------
-            # For each user in the batch, sample one positive and one
-            # negative item.
             bpr_pos_scores = []
             bpr_neg_scores = []
-            for u in batch_users:
+            for i, u in enumerate(batch_users):
                 pos_items = list(self.user_pos[u])
                 if len(pos_items) == 0:
                     continue
@@ -430,7 +437,7 @@ class StudentTrainer:
                 while neg_i in self.user_pos[u]:
                     neg_i = random.randint(0, self.n_items - 1)
 
-                u_emb = student_user_emb[u]
+                u_emb = batch_student_user[i]
                 pos_emb = student_item_emb[pos_i]
                 neg_emb = student_item_emb[neg_i]
 
@@ -446,14 +453,9 @@ class StudentTrainer:
             )
 
             # ----------------------------------------------------------
-            # Step 5:  WRD Loss   (student vs teacher full score matrices)
+            # WRD Loss   (student vs teacher full score matrices)
             # ----------------------------------------------------------
-            # Student scores for batch users vs all items
-            batch_student_user = student_user_emb[user_ids]  # (batch, dim)
-            student_scores = batch_student_user @ student_item_emb.t()  # (batch, n_items)
-
-            # Teacher scores
-            batch_teacher_user = teacher_user_emb[user_ids]
+            student_scores = batch_student_user @ student_item_emb.t()  
             teacher_scores = batch_teacher_user @ teacher_item_emb.t()
 
             l_wrd = wrd_loss(
@@ -462,9 +464,8 @@ class StudentTrainer:
             )
 
             # ----------------------------------------------------------
-            # Step 6:  AMRDD Loss
+            # AMRDD Loss
             # ----------------------------------------------------------
-            # Build positive mask: True where the user has interacted
             pos_mask = torch.zeros(
                 len(batch_users), self.n_items,
                 dtype=torch.bool, device=self.device
@@ -480,7 +481,7 @@ class StudentTrainer:
             )
 
             # ----------------------------------------------------------
-            # Step 7:  Combine and backprop
+            # Combine & Backprop (Prompt parameters only)
             # ----------------------------------------------------------
             loss = total_loss(l_bpr, l_wrd, l_amrdd,
                               self.alpha, self.beta, self.gamma)

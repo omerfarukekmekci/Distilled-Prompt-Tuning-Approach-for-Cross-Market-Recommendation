@@ -178,6 +178,45 @@ def wrd_loss(student_scores: torch.Tensor,
 # 3.  AMRDD LOSS  (Adaptive Market-aware Ranking Decoupled Distillation)
 # =========================================================================
 
+def _safe_kl_divergence(p_target: torch.Tensor, p_input: torch.Tensor,
+                        mask: torch.Tensor) -> torch.Tensor:
+    """
+    Compute per-user KL( p_target || p_input ) only over masked items.
+
+    This avoids the NaN that arises from  0 * log(0)  or  0 * (-inf)
+    when using masked_fill + F.kl_div on sparse positive sets.
+
+    Parameters
+    ----------
+    p_target : (batch, n_items)  – teacher softmax probabilities (masked items only)
+    p_input  : (batch, n_items)  – student softmax probabilities (masked items only)
+    mask     : (batch, n_items)  – bool, True for items in the active set
+
+    Returns
+    -------
+    kl_per_user : (batch,)
+    """
+    eps = 1e-10
+    # Only compute on masked positions → avoid 0·log(0) = NaN
+    # KL = Σ p_T · (log p_T - log p_S)   over masked items
+    log_p_t = (p_target + eps).log()
+    log_p_s = (p_input  + eps).log()
+    kl = p_target * (log_p_t - log_p_s)
+    # Zero-out contributions from items NOT in the set
+    kl = kl * mask.float()
+    return kl.sum(dim=-1)  # (batch,)
+
+
+def _masked_softmax(scores: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """
+    Softmax over items where mask is True, zero elsewhere.
+    Numerically stable: subtracts max before exp.
+    """
+    # Set masked-out items to -inf so they become 0 after softmax
+    scores = scores.masked_fill(~mask, float("-inf"))
+    return F.softmax(scores, dim=-1)
+
+
 def amrdd_loss(student_scores: torch.Tensor,
                teacher_scores: torch.Tensor,
                pos_mask: torch.Tensor,
@@ -185,115 +224,68 @@ def amrdd_loss(student_scores: torch.Tensor,
     """
     Adaptive Market-aware Ranking Decoupled Distillation loss.
 
-    High-level idea
-    ---------------
-    Instead of transferring a single global ranking (like WRD), AMRDD
-    *decouples* the item space into two sets per user:
-        •  observed (positive) items  –  items the user has interacted with
-        •  unobserved (negative) items  –  everything else
+    Decouples items into observed/unobserved sets per user, then minimises
+    KL divergence between teacher and student softmax distributions in each
+    set.  The unobserved-set term is down-weighted when the teacher is
+    uncertain (high entropy → noisy signal).
 
-    For each set, we build a probability distribution from the teacher's
-    and student's scores (via softmax), then minimise the KL divergence
-    so the student's preferences match the teacher's.
-
-    The unobserved-set component is weighted by the teacher's confidence,
-    measured as the entropy of the teacher's distribution over negatives.
-    If the teacher is uncertain among negatives, the weight is low (no
-    point forcing the student to match noise).
-
-    Formula
-    -------
-        L_AMRDD = L_obs + w_neg · L_unobs
-
-    where:
-        L_obs   = KL( p_T^+  ||  p_S^+ )      over observed items
-        L_unobs = KL( p_T^-  ||  p_S^- )      over unobserved items
-        w_neg   = 1 - H(p_T^-) / log(|neg|)   (normalised teacher confidence)
-        p_T, p_S are softmax distributions over the respective item sets
+        L_AMRDD = mean( KL_obs + w_neg · KL_unobs )
 
     Parameters
     ----------
-    student_scores : Tensor (batch_users, n_items)
-    teacher_scores : Tensor (batch_users, n_items)
-    pos_mask : Tensor (batch_users, n_items)   bool
-        True for items the user has observed (positive).
-    temperature : float
-        Softmax temperature.  Higher → softer distributions → gentler
-        distillation.
+    student_scores : (batch, n_items)
+    teacher_scores : (batch, n_items)
+    pos_mask       : (batch, n_items) bool – True for observed items
+    temperature    : float – softmax temperature
 
     Returns
     -------
     loss : scalar Tensor
     """
     batch_size, n_items = student_scores.shape
+    neg_mask = ~pos_mask
 
-    # Scale scores by temperature before taking softmax
-    t_scores = teacher_scores / temperature
-    s_scores = student_scores / temperature
+    # Scale by temperature
+    t_sc = teacher_scores / temperature
+    s_sc = student_scores / temperature
 
-    # ------------------------------------------------------------------
-    # OBSERVED SET (positive items)
-    # ------------------------------------------------------------------
-    # Replace un-observed items with -inf so they contribute 0 after softmax
-    neg_inf = torch.tensor(float("-inf"), device=student_scores.device)
+    # --- Skip users with < 2 positive items (can't form a distribution) ---
+    n_pos = pos_mask.sum(dim=1)  # (batch,)
+    valid = n_pos >= 2           # users we can compute KL_obs for
 
-    t_pos = t_scores.masked_fill(~pos_mask, neg_inf)
-    s_pos = s_scores.masked_fill(~pos_mask, neg_inf)
-
-    # Softmax distributions over observed items only
-    p_T_pos = F.softmax(t_pos, dim=-1)  # (batch, n_items) – zeros on neg items
-    p_S_pos = F.softmax(s_pos, dim=-1)
-
-    # KL divergence:  KL(p_T || p_S) = Σ p_T · log(p_T / p_S)
-    # We use F.kl_div which expects LOG-probabilities for the second argument.
-    log_p_S_pos = F.log_softmax(s_pos, dim=-1)
-
-    # kl_div(input=log_q, target=p) computes  Σ p·(log p - log q)  when
-    # reduction='batchmean'.
-    loss_obs = F.kl_div(log_p_S_pos, p_T_pos, reduction="batchmean")
+    if valid.sum() == 0:
+        # Edge case: no valid users at all → return 0 loss
+        return torch.tensor(0.0, device=student_scores.device, requires_grad=True)
 
     # ------------------------------------------------------------------
-    # UNOBSERVED SET (negative items)
+    # OBSERVED SET  KL(p_T^+ || p_S^+)
     # ------------------------------------------------------------------
-    neg_mask = ~pos_mask  # True for unobserved items
-
-    t_neg = t_scores.masked_fill(pos_mask, neg_inf)
-    s_neg = s_scores.masked_fill(pos_mask, neg_inf)
-
-    p_T_neg = F.softmax(t_neg, dim=-1)
-    log_p_S_neg = F.log_softmax(s_neg, dim=-1)
-
-    loss_unobs = F.kl_div(log_p_S_neg, p_T_neg, reduction="batchmean")
+    p_T_pos = _masked_softmax(t_sc, pos_mask)   # (batch, n_items)
+    p_S_pos = _masked_softmax(s_sc, pos_mask)
+    kl_obs  = _safe_kl_divergence(p_T_pos, p_S_pos, pos_mask)  # (batch,)
 
     # ------------------------------------------------------------------
-    # TEACHER CONFIDENCE WEIGHT
+    # UNOBSERVED SET  KL(p_T^- || p_S^-)
     # ------------------------------------------------------------------
-    # The idea: if the teacher is very unsure among negatives (high entropy),
-    # forcing the student to match that noise is harmful → low weight.
-    # If the teacher has clear preferences among negatives → high weight.
-    #
-    # Normalised confidence = 1 - H(p_T^-) / log(|neg|)
-    #   H(p_T^-) = -Σ p · log p  (entropy)
-    #   log(|neg|) is the maximum possible entropy (uniform distribution)
+    p_T_neg = _masked_softmax(t_sc, neg_mask)
+    p_S_neg = _masked_softmax(s_sc, neg_mask)
+    kl_unobs = _safe_kl_divergence(p_T_neg, p_S_neg, neg_mask)  # (batch,)
+
     # ------------------------------------------------------------------
-    # Number of negative items per user
-    n_neg = neg_mask.sum(dim=1).float().clamp(min=2)  # avoid log(1)=0
-
-    # Entropy of teacher's negative distribution
-    # Clamp p_T_neg to avoid log(0)
-    p_T_neg_safe = p_T_neg.clamp(min=1e-10)
-    entropy = -(p_T_neg_safe * p_T_neg_safe.log()).sum(dim=1)  # (batch,)
-
-    max_entropy = torch.log(n_neg)  # (batch,)
+    # TEACHER CONFIDENCE WEIGHT  (per user)
+    # ------------------------------------------------------------------
+    n_neg = neg_mask.sum(dim=1).float().clamp(min=2)
+    eps = 1e-10
+    entropy = -(p_T_neg.clamp(min=eps) * p_T_neg.clamp(min=eps).log())
+    entropy = (entropy * neg_mask.float()).sum(dim=1)           # (batch,)
+    max_entropy = torch.log(n_neg)
     confidence = (1.0 - entropy / max_entropy).clamp(min=0.0)  # (batch,)
 
-    # Weight the unobserved loss per user, then average
-    weighted_loss_unobs = (confidence * loss_unobs).mean() if loss_unobs.dim() > 0 else confidence.mean() * loss_unobs
-
     # ------------------------------------------------------------------
-    # COMBINE
+    # COMBINE per-user, then average over valid users
     # ------------------------------------------------------------------
-    loss = loss_obs + weighted_loss_unobs
+    per_user = kl_obs + confidence * kl_unobs   # (batch,)
+    loss = per_user[valid].mean()
 
     return loss
 
