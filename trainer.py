@@ -86,6 +86,9 @@ class PreTrainer:
             model.parameters(), lr=lr, weight_decay=weight_decay
         )
 
+        # LR scheduler will be created in train() once we know n_epochs
+        self.scheduler = None
+
         # Pre-compute positive items per user for faster negative sampling
         self.user_pos = defaultdict(set)
         for u, i in combined_interactions:
@@ -169,14 +172,21 @@ class PreTrainer:
         batch_size : int
         verbose : bool   – print loss every 5 epochs
         """
+        # Cosine annealing: gradually reduce LR for better convergence
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=n_epochs, eta_min=1e-5
+        )
+
         for epoch in range(1, n_epochs + 1):
             t0 = time.time()
             avg_loss = self.train_epoch(batch_size)
+            self.scheduler.step()
             epoch_time = time.time() - t0
 
+            current_lr = self.optimizer.param_groups[0]['lr']
             if verbose and (epoch % 10 == 0 or epoch == 1):
                 print(f"  [PreTrain] Epoch {epoch:3d}/{n_epochs}  "
-                      f"Loss: {avg_loss:.4f}  "
+                      f"Loss: {avg_loss:.4f}  LR: {current_lr:.6f}  "
                       f"({epoch_time:.1f}s/epoch)")
 
 
@@ -270,7 +280,8 @@ class TeacherTrainer:
 
     def train(self, n_epochs: int = 100, batch_size: int = 1024,
               verbose: bool = True):
-        """Full teacher training loop."""
+        """Full teacher training loop (no LR scheduler — teacher converges
+        well with constant LR on the smaller target graph)."""
         for epoch in range(1, n_epochs + 1):
             t0 = time.time()
             avg_loss = self.train_epoch(batch_size)
@@ -523,6 +534,11 @@ class StudentTrainer:
             k_list = [10, 20]
 
         best_metrics = None
+        best_ndcg = -1.0
+        best_epoch = 0
+        best_prompt_state = None
+        patience_counter = 0
+        patience = 30  # stop if no improvement for 30 epochs
 
         for epoch in range(1, n_epochs + 1):
             t0 = time.time()
@@ -534,22 +550,54 @@ class StudentTrainer:
                       f"Loss: {avg_loss:.4f}  "
                       f"({epoch_time:.1f}s/epoch)")
 
-            # Periodic validation
-            if val_dict and epoch % 10 == 0:
+            # Periodic validation with early stopping
+            if val_dict and epoch % eval_every == 0:
                 metrics = evaluate_model(
                     self.backbone, self.adj, val_dict, self.n_items,
                     k_list, train_interactions=train_interactions,
                     prompt_module=self.prompt_module,
                     device=self.device
                 )
+
+                # Track best model by NDCG@10 (or smallest K)
+                ndcg_key = f"NDCG@{min(k_list)}"
+                current_ndcg = metrics.get(ndcg_key, 0.0)
+
+                if current_ndcg > best_ndcg:
+                    best_ndcg = current_ndcg
+                    best_epoch = epoch
+                    best_metrics = metrics
+                    best_prompt_state = {
+                        k: v.clone() for k, v in
+                        self.prompt_module.state_dict().items()
+                    }
+                    marker = " ★ best"
+                    patience_counter = 0
+                else:
+                    marker = ""
+                    patience_counter += eval_every
+
                 if verbose:
                     metrics_str = "  ".join(
                         f"{k}: {v:.4f}" for k, v in metrics.items()
                     )
-                    print(f"    [Val] {metrics_str}")
-                best_metrics = metrics
+                    print(f"    [Val] {metrics_str}{marker}")
 
-        # Final test evaluation
+                # Early stopping check
+                if patience_counter >= patience:
+                    if verbose:
+                        print(f"  ⚡ Early stopping at epoch {epoch} "
+                              f"(best was epoch {best_epoch}, "
+                              f"{ndcg_key}={best_ndcg:.4f})")
+                    break
+
+        # Restore best prompt weights
+        if best_prompt_state is not None:
+            self.prompt_module.load_state_dict(best_prompt_state)
+            if verbose:
+                print(f"  ✓ Restored best prompts from epoch {best_epoch}")
+
+        # Final test evaluation (using best model)
         if test_dict:
             final_metrics = evaluate_model(
                 self.backbone, self.adj, test_dict, self.n_items,

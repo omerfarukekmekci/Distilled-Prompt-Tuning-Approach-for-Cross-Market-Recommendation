@@ -53,10 +53,10 @@ from trainer import PreTrainer, TeacherTrainer, StudentTrainer
 # =====================================================================
 # EASY-ACCESS DEFAULTS  (modify these to avoid typing CLI args)
 # =====================================================================
-DEFAULT_PRETRAIN_EPOCHS  = 100
-DEFAULT_TEACHER_EPOCHS   = 150
-DEFAULT_STUDENT_EPOCHS   = 50
-DEFAULT_EVAL_EVERY       = 10
+DEFAULT_PRETRAIN_EPOCHS  = 300
+DEFAULT_TEACHER_EPOCHS   = 200
+DEFAULT_STUDENT_EPOCHS   = 300
+DEFAULT_EVAL_EVERY       = 5
 
 
 # =====================================================================
@@ -178,12 +178,10 @@ def parse_args():
     # ---- Student training ----
     parser.add_argument("--student_epochs", type=int, default=DEFAULT_STUDENT_EPOCHS,
                         help="Epochs for student prompt training")
-    parser.add_argument("--student_lr", type=float, default=1e-2,
-                        help="Learning rate for student (prompts only, "
-                             "higher than backbone because prompts are small)")
-    parser.add_argument("--student_batch", type=int, default=256,
-                        help="Batch size for student (smaller because "
-                             "we compute full score matrices)")
+    parser.add_argument("--student_lr", type=float, default=1e-4,
+                        help="Learning rate for prompt tuning (paper uses 1e-4)")
+    parser.add_argument("--student_batch", type=int, default=16,
+                        help="Batch size for student (paper uses 16 users per batch)")
 
     # ---- Loss weights  (L_total = α·BPR + β·WRD + γ·AMRDD) ----
     parser.add_argument("--alpha", type=float, default=1.0,
@@ -223,8 +221,8 @@ def parse_args():
                         help="Random seed for reproducibility")
     parser.add_argument("--device", type=str, default="auto",
                         help="Device: 'cpu', 'cuda', or 'auto'")
-    parser.add_argument("--weight_decay", type=float, default=1e-5,
-                        help="L2 regularisation for pre-train and teacher")
+    parser.add_argument("--weight_decay", type=float, default=1e-6,
+                        help="L2 regularisation (paper uses 1e-6)")
 
     return parser.parse_args()
 

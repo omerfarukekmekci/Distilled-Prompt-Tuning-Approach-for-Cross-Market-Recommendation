@@ -133,41 +133,40 @@ def wrd_loss(student_scores: torch.Tensor,
     # teacher_topk_indices: (batch, K) – item indices ranked by teacher
     _, teacher_topk_indices = teacher_scores.topk(K, dim=1)
 
-    # Teacher ranks: for item at position r in teacher_topk, its rank is r+1
-    # (1‐indexed).  Shape: (K,)
+    # Teacher ranks: 1-indexed positions in teacher's top-K.  Shape: (K,)
     teacher_ranks = torch.arange(1, K + 1, dtype=torch.float32,
                                  device=student_scores.device)
 
-    # ---- Position weight  w_pos ----
-    # Higher-ranked items (smaller r) get more weight.
-    # w_pos(r) = (1 - exp(-(K-r+1)·λ)) / (1 - exp(-λ))
-    exponents = -(K - teacher_ranks + 1) * lam
-    w_pos = (1.0 - torch.exp(exponents)) / (1.0 - torch.exp(torch.tensor(-lam,
-              device=student_scores.device)))  # (K,)
+    # ---- Position weight  w_pos  (Paper Eq. 7) ----
+    # w_pos(r) = exp(-r / λ) / Σ_{k=1}^{K} exp(-k / λ)
+    # Softmax-style: higher-ranked items (smaller r) get more weight.
+    w_pos = torch.exp(-teacher_ranks / lam)          # (K,)
+    w_pos = w_pos / w_pos.sum()                       # normalise to sum=1
 
     # ---- Student's ranks for the teacher's top-K items ----
-    # We compute the student's rank of each item by sorting student_scores
-    # descendingly and finding where the teacher's chosen items end up.
-    # argsort of argsort gives ranks.
+    # argsort of argsort gives ranks (1-based).
     student_rank_all = student_scores.argsort(dim=1, descending=True).argsort(dim=1) + 1
-    # student_rank_all is (batch, n_items) with 1-based ranks
 
     # Gather student ranks for teacher's top-K items  → (batch, K)
     student_ranks_topk = student_rank_all.gather(1, teacher_topk_indices).float()
 
-    # ---- Deviation weight  w_dev ----
-    # w_dev(r) = σ( μ · | teacher_rank - student_rank | )
-    rank_deviation = (teacher_ranks.unsqueeze(0) - student_ranks_topk).abs()  # (batch, K)
+    # ---- Deviation weight  w_dev  (Paper Eq. 8) ----
+    # w_dev(r) = σ( μ · (r̂_{i_r} - r) )
+    # Signed difference: penalises more when student ranks item LOWER
+    # than the teacher (r̂ > r → positive → larger sigmoid).
+    rank_deviation = student_ranks_topk - teacher_ranks.unsqueeze(0)  # (batch, K)
     w_dev = torch.sigmoid(mu * rank_deviation)  # (batch, K)
 
-    # ---- Combined weight ----
-    w = w_pos.unsqueeze(0) * w_dev  # (batch, K)
+    # ---- Combined weight  (Paper Eq. 9) ----
+    # w_r = (w_pos_r · w_dev_r) / Σ_j (w_pos_j · w_dev_j)
+    w = w_pos.unsqueeze(0) * w_dev                    # (batch, K)
+    w = w / w.sum(dim=1, keepdim=True).clamp(min=1e-10)  # normalise per user
 
     # ---- Student scores for teacher's top-K items ----
     student_topk_scores = student_scores.gather(1, teacher_topk_indices)  # (batch, K)
 
-    # ---- WRD loss ----
-    # -w · log σ(student_score)
+    # ---- WRD loss  (Paper Eq. 5) ----
+    # L_WRD = -Σ w_r · log σ(ŷ_{i_r})
     log_sigmoid = F.logsigmoid(student_topk_scores)  # (batch, K)
     loss = -(w * log_sigmoid).sum(dim=1).mean()
 
