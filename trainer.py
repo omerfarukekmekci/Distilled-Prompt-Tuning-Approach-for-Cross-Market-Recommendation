@@ -19,6 +19,10 @@ its own trainer class:
 │  using  L_total = α·L_BPR + β·L_WRD + γ·L_AMRDD.              │
 │  Goal: adapt the backbone to the target market via prompts,      │
 │  guided by the teacher's distillation signal.                    │
+│                                                                   │
+│  AMRDD uses per-source-market batches with adaptive weights αm   │
+│  (Paper Eq. 14-15) to dynamically weight each source market's    │
+│  contribution to the distillation loss.                          │
 └─────────────────────────────────────────────────────────────────┘
 
 Why three separate phases?
@@ -308,8 +312,11 @@ class StudentTrainer:
 
     •  L_BPR uses the student's own (prompted) embeddings against target
        market interaction data.
-    •  L_WRD and L_AMRDD compare the student's scores to the teacher's
-       scores, transferring the teacher's target-market knowledge.
+    •  L_WRD compares the student's scores to the teacher's scores on
+       the target market, transferring global ranking knowledge.
+    •  L_AMRDD uses per-source-market batches with adaptive weights αm
+       (Paper Eq. 14-15) to dynamically weight each source market's
+       contribution to the distillation loss.
 
     Parameters
     ----------
@@ -321,15 +328,19 @@ class StudentTrainer:
         The trained teacher — also FROZEN (used for distillation only).
     target_adj : torch.sparse.FloatTensor
     target_interactions : list of (user, item)
+    source_market_interactions : dict
+        {market_name: [(user, item), ...]} – interactions per source market
     n_items : int
     alpha, beta, gamma : float
         Loss balancing hyperparameters.
     K : int
-        Top-K for WRD.
+        Top-K for WRD and AMRDD.
     wrd_lambda, wrd_mu : float
         WRD hyperparameters.
     amrdd_temperature : float
         Temperature for AMRDD softmax.
+    source_batch_size : int
+        Number of users to sample per source market per batch (default 16).
     lr, device : as above
     """
 
@@ -338,6 +349,7 @@ class StudentTrainer:
                  teacher_model: LightGCN,
                  target_adj,
                  target_interactions,
+                 source_market_interactions: dict,
                  n_items: int,
                  alpha: float = 1.0,
                  beta: float = 0.5,
@@ -346,6 +358,7 @@ class StudentTrainer:
                  wrd_lambda: float = 1.0,
                  wrd_mu: float = 1.0,
                  amrdd_temperature: float = 1.0,
+                 source_batch_size: int = 16,
                  lr: float = 1e-3,
                  device: str = "cpu"):
 
@@ -380,20 +393,58 @@ class StudentTrainer:
         self.wrd_lambda = wrd_lambda
         self.wrd_mu = wrd_mu
         self.amrdd_temperature = amrdd_temperature
+        self.source_batch_size = source_batch_size
 
         # Optimiser over prompt parameters ONLY
         self.optimizer = optim.Adam(
             prompt_module.parameters(), lr=lr
         )
 
-        # Pre-compute user positive sets
+        # Pre-compute user positive sets (target market)
         self.user_pos = defaultdict(set)
         for u, i in target_interactions:
             self.user_pos[u].add(i)
 
-        # Get the unique users who appear in the target market training set,
-        # used for sampling batches during distillation.
+        # Get the unique users who appear in the target market training set
         self.train_users = list(self.user_pos.keys())
+
+        # ---- Source market data for AMRDD (Paper Eq. 14-15) ----
+        self.source_market_interactions = source_market_interactions
+
+        # Build per-source-market user lists and user_pos dicts
+        self.source_market_users = {}
+        self.source_market_user_pos = {}
+        for market_name, interactions in source_market_interactions.items():
+            user_pos_m = defaultdict(set)
+            for u, i in interactions:
+                user_pos_m[u].add(i)
+            self.source_market_users[market_name] = list(user_pos_m.keys())
+            self.source_market_user_pos[market_name] = dict(user_pos_m)
+
+        # Combined user_pos for AMRDD sampling (all markets)
+        self.all_user_pos = defaultdict(set)
+        for u, i in target_interactions:
+            self.all_user_pos[u].add(i)
+        for interactions in source_market_interactions.values():
+            for u, i in interactions:
+                self.all_user_pos[u].add(i)
+
+    def _sample_source_market_batches(self):
+        """
+        Sample a batch of users from each source market for AMRDD.
+
+        Returns
+        -------
+        dict : {market_name: list of user_ids}
+        """
+        batches = {}
+        for market_name, users in self.source_market_users.items():
+            if len(users) == 0:
+                continue
+            n_sample = min(self.source_batch_size, len(users))
+            sampled = random.sample(users, n_sample)
+            batches[market_name] = sampled
+        return batches
 
     def train_epoch(self, batch_size: int = 1024):
         """
@@ -405,6 +456,8 @@ class StudentTrainer:
             3. Propagate prompts through GCN: GCN(ψ)
             4. Student embeddings = GCN(X) + GCN(ψ)  (by linearity)
             5. Compute losses and backprop through prompt parameters
+
+        AMRDD now uses per-source-market batches with adaptive weights αm.
         """
         self.prompt_module.train()
 
@@ -429,18 +482,6 @@ class StudentTrainer:
 
         # =============================================================
         # STEP B: Batch training loop
-        #
-        # For each batch, we recompute prompts and GCN propagation.
-        # This is necessary because optimizer.step() modifies prompt
-        # parameters in-place, invalidating any retained computation
-        # graph.  The overhead is minimal (~10ms per batch for prompt
-        # attention + 3 GCN sparse matmuls on GPU).
-        #
-        # Paper architecture per batch:
-        #   1. ψ = PromptModule(X_init)           — attention-based prompts
-        #   2. X'_T = X_init + ψ                  — add prompts to initial embeddings
-        #   3. E_student = GCN(X'_T)              — propagate through GCN
-        #   4. Compute losses & backprop
         # =============================================================
         batch_starts = list(range(0, len(self.train_users), batch_size))
 
@@ -469,7 +510,7 @@ class StudentTrainer:
             batch_teacher_user = teacher_user_emb[user_ids]
 
             # ----------------------------------------------------------
-            # BPR Loss
+            # BPR Loss (target market)
             # ----------------------------------------------------------
             bpr_pos_scores = []
             bpr_neg_scores = []
@@ -498,7 +539,7 @@ class StudentTrainer:
             )
 
             # ----------------------------------------------------------
-            # WRD Loss   (student vs teacher full score matrices)
+            # WRD Loss  (student vs teacher on target market)
             # ----------------------------------------------------------
             student_scores = batch_student_user @ student_item_emb.t()  
             teacher_scores = batch_teacher_user @ teacher_item_emb.t()
@@ -509,20 +550,21 @@ class StudentTrainer:
             )
 
             # ----------------------------------------------------------
-            # AMRDD Loss
+            # AMRDD Loss  (per-source-market with adaptive αm)
+            # Paper Eq. 14-15
             # ----------------------------------------------------------
-            pos_mask = torch.zeros(
-                len(batch_users), self.n_items,
-                dtype=torch.bool, device=self.device
-            )
-            for idx, u in enumerate(batch_users):
-                pos_items_list = list(self.user_pos[u])
-                if len(pos_items_list) > 0:
-                    pos_mask[idx, pos_items_list] = True
+            source_batches = self._sample_source_market_batches()
 
             l_amrdd = amrdd_loss(
-                student_scores, teacher_scores.detach(),
-                pos_mask, K=self.K, temperature=self.amrdd_temperature
+                student_user_emb=student_user_emb,
+                student_item_emb=student_item_emb,
+                teacher_user_emb=teacher_user_emb,
+                teacher_item_emb=teacher_item_emb,
+                source_market_batches=source_batches,
+                target_user_pos=self.all_user_pos,
+                n_items=self.n_items,
+                K=self.K,
+                temperature=self.amrdd_temperature,
             )
 
             # ----------------------------------------------------------

@@ -545,6 +545,22 @@ def load_all_markets(data_dir: str, source_markets: list, target_market: str,
     print(f"  Target train: {len(train_inter):,} edges, "
           f"val users: {len(val_dict):,}, test users: {len(test_dict):,}")
 
+    # ---- Per-source-market interactions (for AMRDD αm) ----
+    # AMRDD (Eq. 14-15) needs separate batches from each source market
+    # to compute adaptive market weights.
+    source_market_interactions = {}
+    for m in source_markets:
+        src_df = market_dfs[m]
+        src_interactions = []
+        for _, row in src_df.iterrows():
+            uid = user2id[row["userId"]]
+            iid = item2id[row["itemId"]]
+            src_interactions.append((uid, iid))
+        src_interactions = list(set(src_interactions))
+        source_market_interactions[m] = src_interactions
+    print(f"  Source market interactions: "
+          + ", ".join(f"{m}={len(v):,}" for m, v in source_market_interactions.items()))
+
     return {
         "user2id": user2id,
         "item2id": item2id,
@@ -558,4 +574,5 @@ def load_all_markets(data_dir: str, source_markets: list, target_market: str,
         "target_test": test_dict,
         "target_full_interactions": target_full_interactions,
         "market_dfs": market_dfs,
+        "source_market_interactions": source_market_interactions,
     }

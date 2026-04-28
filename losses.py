@@ -23,7 +23,8 @@ Each term captures a different learning signal:
    Provides *fine-grained, market-specific* guidance by comparing the
    student's and teacher's preference distributions via KL divergence.
    It "decouples" the loss into observed and unobserved item sets and
-   dynamically weights them based on the teacher's confidence.
+   dynamically weights each source market's contribution using adaptive
+   weights αm (Eq. 14).
 
 Combined, these three losses let the student learn from:
 •  sparse real labels (BPR),
@@ -87,7 +88,7 @@ def wrd_loss(student_scores: torch.Tensor,
              lam: float = 1.0,
              mu: float = 1.0) -> torch.Tensor:
     """
-    Weighted Ranking Distillation loss.
+    Weighted Ranking Distillation loss  (Paper Eq. 5–9).
 
     High-level idea
     ---------------
@@ -102,23 +103,21 @@ def wrd_loss(student_scores: torch.Tensor,
         L_WRD = -(1/|U|) Σ_u  Σ_{r=1}^{K}  w_r · log σ(s_S(u, i_r))
 
     where:
-        w_r   = w_pos(r) · w_dev(r)
-        w_pos = (1 - exp(-(K-r+1)·λ)) / (1 - exp(-λ))     (position weight)
-        w_dev = σ( μ · |r - r̂_student(i_r)| )             (deviation weight)
+        w_pos(r) = exp(-r/λ) / Σ_{k=1}^{K} exp(-k/λ)   (Eq. 7)
+        w_dev(r) = σ( μ · (r̂_{i_r} - r) )               (Eq. 8)
+        w_r = (w_pos · w_dev) / Σ (w_pos · w_dev)         (Eq. 9)
+
+    IMPORTANT FIX: The student rank r̂_{i_r} is computed WITHIN the
+    teacher's top-K items only, not across all items globally. This
+    ensures rank deviation is meaningful (both ranks in [1, K]).
 
     Parameters
     ----------
     student_scores : Tensor (batch_users, n_items)
-        Student's predicted scores for all items.
     teacher_scores : Tensor (batch_users, n_items)
-        Teacher's predicted scores for all items.
     K : int
-        Number of top teacher-ranked items to consider.
     lam : float  (λ)
-        Temperature for position weight decay.  Higher → flatter weights.
     mu : float  (μ)
-        Sensitivity of deviation weight.  Higher → sharper penalty for
-        disagreement.
 
     Returns
     -------
@@ -139,31 +138,28 @@ def wrd_loss(student_scores: torch.Tensor,
 
     # ---- Position weight  w_pos  (Paper Eq. 7) ----
     # w_pos(r) = exp(-r / λ) / Σ_{k=1}^{K} exp(-k / λ)
-    # Softmax-style: higher-ranked items (smaller r) get more weight.
     w_pos = torch.exp(-teacher_ranks / lam)          # (K,)
     w_pos = w_pos / w_pos.sum()                       # normalise to sum=1
 
     # ---- Student's ranks for the teacher's top-K items ----
-    # argsort of argsort gives ranks (1-based).
-    student_rank_all = student_scores.argsort(dim=1, descending=True).argsort(dim=1) + 1
+    # FIX: Compute ranks WITHIN the teacher's top-K items only.
+    # Get student scores for teacher's top-K items
+    student_topk_scores = student_scores.gather(1, teacher_topk_indices)  # (batch, K)
 
-    # Gather student ranks for teacher's top-K items  → (batch, K)
-    student_ranks_topk = student_rank_all.gather(1, teacher_topk_indices).float()
+    # Rank within top-K: argsort of argsort gives ranks (0-based), +1 for 1-based
+    student_ranks_topk = (student_topk_scores.argsort(dim=1, descending=True)
+                          .argsort(dim=1).float() + 1)  # (batch, K)
 
     # ---- Deviation weight  w_dev  (Paper Eq. 8) ----
     # w_dev(r) = σ( μ · (r̂_{i_r} - r) )
-    # Signed difference: penalises more when student ranks item LOWER
-    # than the teacher (r̂ > r → positive → larger sigmoid).
+    # When student ranks item LOWER than teacher (r̂ > r): positive → larger sigmoid
+    # When student agrees with teacher (r̂ ≈ r): sigmoid ≈ 0.5
     rank_deviation = student_ranks_topk - teacher_ranks.unsqueeze(0)  # (batch, K)
     w_dev = torch.sigmoid(mu * rank_deviation)  # (batch, K)
 
     # ---- Combined weight  (Paper Eq. 9) ----
-    # w_r = (w_pos_r · w_dev_r) / Σ_j (w_pos_j · w_dev_j)
     w = w_pos.unsqueeze(0) * w_dev                    # (batch, K)
     w = w / w.sum(dim=1, keepdim=True).clamp(min=1e-10)  # normalise per user
-
-    # ---- Student scores for teacher's top-K items ----
-    student_topk_scores = student_scores.gather(1, teacher_topk_indices)  # (batch, K)
 
     # ---- WRD loss  (Paper Eq. 5) ----
     # L_WRD = -Σ w_r · log σ(ŷ_{i_r})
@@ -178,9 +174,55 @@ def wrd_loss(student_scores: torch.Tensor,
 #     Paper Equations 10–15
 # =========================================================================
 
-def amrdd_loss(student_scores: torch.Tensor,
-               teacher_scores: torch.Tensor,
-               pos_mask: torch.Tensor,
+def _compute_amrdd_components(logits_T: torch.Tensor,
+                               logits_S: torch.Tensor,
+                               eps: float = 1e-10):
+    """
+    Compute the decoupled KL components for one batch.
+
+    Parameters
+    ----------
+    logits_T : (N, K) – teacher logits [y+, y-_2, ..., y-_K]
+    logits_S : (N, K) – student logits
+
+    Returns
+    -------
+    kl_global : (N,)  – KL(d^T || d^S) per user
+    kl_fine   : (N,)  – KL(z^T || z^S) per user
+    d_pos_T   : (N, 1) – teacher's positive preference
+    d_neg_T   : (N, 1) – teacher's negative preference
+    d_pos_S   : (N, 1) – student's positive preference (for αm)
+    """
+    # --- Global Preference Distribution d = [d+, d-]  (Eq. 10) ---
+    log_denom_T = torch.logsumexp(logits_T, dim=1, keepdim=True)
+    d_pos_T = torch.exp(logits_T[:, 0:1] - log_denom_T)
+    d_neg_T = torch.exp(torch.logsumexp(logits_T[:, 1:], dim=1, keepdim=True) - log_denom_T)
+
+    log_denom_S = torch.logsumexp(logits_S, dim=1, keepdim=True)
+    d_pos_S = torch.exp(logits_S[:, 0:1] - log_denom_S)
+    d_neg_S = torch.exp(torch.logsumexp(logits_S[:, 1:], dim=1, keepdim=True) - log_denom_S)
+
+    # --- Global KL  (Eq. 11) ---
+    kl_global = (d_pos_T * torch.log((d_pos_T + eps) / (d_pos_S + eps)) +
+                 d_neg_T * torch.log((d_neg_T + eps) / (d_neg_S + eps))).squeeze(1)
+
+    # --- Fine-grained Preference Distribution z  (Eq. 12) ---
+    z_T = F.softmax(logits_T[:, 1:], dim=1)
+    z_S = F.softmax(logits_S[:, 1:], dim=1)
+
+    # --- Fine-grained KL  (Eq. 13) ---
+    kl_fine = (z_T * torch.log((z_T + eps) / (z_S + eps))).sum(dim=1)
+
+    return kl_global, kl_fine, d_pos_T, d_neg_T, d_pos_S
+
+
+def amrdd_loss(student_user_emb: torch.Tensor,
+               student_item_emb: torch.Tensor,
+               teacher_user_emb: torch.Tensor,
+               teacher_item_emb: torch.Tensor,
+               source_market_batches: dict,
+               target_user_pos: dict,
+               n_items: int,
                K: int = 50,
                temperature: float = 1.0) -> torch.Tensor:
     """
@@ -188,99 +230,186 @@ def amrdd_loss(student_scores: torch.Tensor,
 
     **Paper-faithful implementation (Eq. 10–15).**
 
-    For each user u, we construct a ranked list of K items:
-        i = [i⁺₁, i⁻₂, …, i⁻_K]
-    containing 1 positive (observed) item and K−1 randomly sampled
-    negative (unobserved) items.
+    For each source market m, we:
+      1. Sample a batch of users from market m
+      2. For each user, construct item list [pos, neg_1, ..., neg_{K-1}]
+      3. Compute student & teacher logits
+      4. Compute decoupled KL components
+      5. Compute adaptive weight αm (Eq. 14)
+      6. Weight the per-market loss
 
-    The loss decouples the alignment into two parts:
-
-    a) **Global Preference Alignment** (Eq. 10–11)
-       d = [d⁺, d⁻] is a 2-element distribution capturing the
-       aggregated probability of the positive vs all negatives.
-       We minimise KL(d_T ∥ d_S).
-
-    b) **Fine-grained Preference Alignment** (Eq. 12–13)
-       z = softmax over only the negative items' logits.
-       We minimise KL(z_T ∥ z_S).
-
-    The final objective (Eq. 15, simplified without per-market αm):
-       L = KL(d_T ∥ d_S) + d⁻_T · KL(z_T ∥ z_S)
-
-    The fine-grained loss is weighted by d⁻_T (teacher's confidence
-    in the unobserved set).  When the teacher is very confident about
-    the positive item (d⁺_T ≈ 1), the negative ranking matters less.
+    The final loss (Eq. 15):
+        L_AMRDD = Σ_{m∈Ms} αm · [KL(d^T ∥ d^S_m) + d^{-T} · KL(z^T ∥ z^S_m)]
 
     Parameters
     ----------
-    student_scores : (batch, n_items)  – student logits for all items
-    teacher_scores : (batch, n_items)  – teacher logits (detached)
-    pos_mask       : (batch, n_items)  – bool, True for observed items
-    K              : int  – total items in sampled list (1 pos + K-1 neg)
-    temperature    : float – softmax temperature
+    student_user_emb : (n_users, dim) – student user embeddings
+    student_item_emb : (n_items, dim) – student item embeddings
+    teacher_user_emb : (n_users, dim) – teacher user embeddings
+    teacher_item_emb : (n_items, dim) – teacher item embeddings
+    source_market_batches : dict
+        {market_name: list of user_ids} – pre-sampled user batches per market
+    target_user_pos : dict
+        {user_id: set of positive item ids} – for all markets combined
+    n_items : int
+    K : int – total items in sampled list (1 pos + K-1 neg)
+    temperature : float
 
     Returns
     -------
     loss : scalar Tensor
     """
-    batch_size, n_items = student_scores.shape
-    K = min(K, n_items)
-    device = student_scores.device
+    device = student_user_emb.device
     eps = 1e-10
 
-    # Mask for users that have at least 1 positive item and K-1 negative items
-    valid_mask = (pos_mask.sum(dim=1) > 0) & ((~pos_mask).sum(dim=1) >= K - 1)
-    if not valid_mask.any():
+    if len(source_market_batches) == 0:
         return torch.tensor(0.0, device=device, requires_grad=True)
 
-    # Filter to only valid users
-    valid_student_scores = student_scores[valid_mask]
-    valid_teacher_scores = teacher_scores[valid_mask]
-    valid_pos_mask = pos_mask[valid_mask]
+    # --- Step 1: Compute teacher's global preference on TARGET users ---
+    # We need d^{+T} for αm computation (Eq. 14).
+    # Use the target users that appear in at least one source market batch.
+    # For efficiency, compute a single reference d^{+T} from the target.
 
-    # ---- Sample 1 positive item per user ----
-    pos_probs = valid_pos_mask.float()
-    pos_indices = torch.multinomial(pos_probs, num_samples=1)  # (N, 1)
+    # --- Step 2: Per-market loss computation ---
+    market_losses = []       # per-market weighted loss
+    market_d_pos_S = {}      # d^{+S}_m for αm computation
 
-    # ---- Sample K-1 negative items per user ----
-    neg_probs = (~valid_pos_mask).float()
-    neg_indices = torch.multinomial(neg_probs, num_samples=K - 1, replacement=False)  # (N, K-1)
+    for market_name, batch_user_ids in source_market_batches.items():
+        if len(batch_user_ids) == 0:
+            continue
 
-    # ---- Construct item list: [pos, neg₁, neg₂, …, neg_{K-1}] ----
-    item_list = torch.cat([pos_indices, neg_indices], dim=1)  # (N, K)
+        user_ids_tensor = torch.LongTensor(batch_user_ids).to(device)
 
-    # ---- Logit matrices for teacher and student (N, K) ----
-    y_T = valid_teacher_scores.gather(1, item_list) / temperature
-    y_S = valid_student_scores.gather(1, item_list) / temperature
+        # Get embeddings for this batch
+        s_user = student_user_emb[user_ids_tensor]  # (B, dim)
+        t_user = teacher_user_emb[user_ids_tensor]  # (B, dim)
 
-    # ==============================================================
-    # a) Global Preference Alignment  (Paper Eq. 10–11)
-    # ==============================================================
-    log_denom_T = torch.logsumexp(y_T, dim=1, keepdim=True)
-    d_pos_T = torch.exp(y_T[:, 0:1] - log_denom_T)
-    d_neg_T = torch.exp(torch.logsumexp(y_T[:, 1:], dim=1, keepdim=True) - log_denom_T)
+        # Compute scores against all items
+        s_scores = s_user @ student_item_emb.t()  # (B, n_items)
+        t_scores = t_user @ teacher_item_emb.t()  # (B, n_items)
 
-    log_denom_S = torch.logsumexp(y_S, dim=1, keepdim=True)
-    d_pos_S = torch.exp(y_S[:, 0:1] - log_denom_S)
-    d_neg_S = torch.exp(torch.logsumexp(y_S[:, 1:], dim=1, keepdim=True) - log_denom_S)
+        # For each user, sample 1 positive + K-1 negatives
+        valid_users = []
+        item_lists = []
 
-    kl_global = (d_pos_T * torch.log((d_pos_T + eps) / (d_pos_S + eps)) +
-                 d_neg_T * torch.log((d_neg_T + eps) / (d_neg_S + eps))).squeeze(1)  # (N,)
+        for idx, uid in enumerate(batch_user_ids):
+            pos_items = target_user_pos.get(uid, set())
+            if len(pos_items) == 0:
+                continue
 
-    # ==============================================================
-    # b) Fine-grained Preference Alignment  (Paper Eq. 12–13)
-    # ==============================================================
-    z_T = F.softmax(y_T[:, 1:], dim=1)  # (N, K-1)
-    z_S = F.softmax(y_S[:, 1:], dim=1)  # (N, K-1)
+            # Sample 1 positive
+            pos_item = next(iter(pos_items)) if len(pos_items) == 1 else \
+                list(pos_items)[torch.randint(len(pos_items), (1,)).item()]
 
-    kl_fine = (z_T * torch.log((z_T + eps) / (z_S + eps))).sum(dim=1)  # (N,)
+            # Sample K-1 negatives
+            neg_items = []
+            attempts = 0
+            while len(neg_items) < K - 1 and attempts < K * 10:
+                neg = torch.randint(0, n_items, (1,)).item()
+                if neg not in pos_items:
+                    neg_items.append(neg)
+                attempts += 1
 
-    # ==============================================================
-    # Combined loss  (Paper Eq. 15, simplified)
-    # ==============================================================
-    user_loss = kl_global + d_neg_T.squeeze(1) * kl_fine
+            if len(neg_items) < K - 1:
+                continue
 
-    return user_loss.mean()
+            valid_users.append(idx)
+            item_lists.append([pos_item] + neg_items)
+
+        if len(valid_users) == 0:
+            continue
+
+        valid_indices = torch.LongTensor(valid_users).to(device)
+        item_indices = torch.LongTensor(item_lists).to(device)  # (N_valid, K)
+
+        # Gather logits
+        logits_T = t_scores[valid_indices].gather(1, item_indices) / temperature  # (N, K)
+        logits_S = s_scores[valid_indices].gather(1, item_indices) / temperature  # (N, K)
+
+        # Compute decoupled KL components
+        kl_global, kl_fine, d_pos_T, d_neg_T, d_pos_S = _compute_amrdd_components(
+            logits_T, logits_S
+        )
+
+        # Per-user loss for this market (Eq. 15 inner part)
+        per_user_loss = kl_global + d_neg_T.squeeze(1) * kl_fine  # (N,)
+        market_loss = per_user_loss.mean()
+        market_losses.append(market_loss)
+
+        # Store mean d^{+S}_m for αm computation (Eq. 14)
+        market_d_pos_S[market_name] = d_pos_S.mean().detach()
+
+    if len(market_losses) == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    # --- Step 3: Compute teacher's d^{+T} for αm ---
+    # Use a representative set of target users (from all batches combined)
+    all_batch_users = []
+    for users in source_market_batches.values():
+        all_batch_users.extend(users)
+    all_batch_users = list(set(all_batch_users))
+
+    # Filter to users with positive items
+    target_users_with_pos = [u for u in all_batch_users if len(target_user_pos.get(u, set())) > 0]
+    if len(target_users_with_pos) > 0:
+        sample_size = min(64, len(target_users_with_pos))
+        sample_users = target_users_with_pos[:sample_size]
+        sample_ids = torch.LongTensor(sample_users).to(device)
+
+        t_user_sample = teacher_user_emb[sample_ids]
+        t_scores_sample = t_user_sample @ teacher_item_emb.t()
+
+        # Build item lists for teacher d^{+T} estimation
+        valid_t = []
+        item_lists_t = []
+        for idx, uid in enumerate(sample_users):
+            pos_items = target_user_pos.get(uid, set())
+            if len(pos_items) == 0:
+                continue
+            pos_item = list(pos_items)[0]
+            neg_items = []
+            attempts = 0
+            while len(neg_items) < K - 1 and attempts < K * 10:
+                neg = torch.randint(0, n_items, (1,)).item()
+                if neg not in pos_items:
+                    neg_items.append(neg)
+                attempts += 1
+            if len(neg_items) < K - 1:
+                continue
+            valid_t.append(idx)
+            item_lists_t.append([pos_item] + neg_items)
+
+        if len(valid_t) > 0:
+            valid_t_idx = torch.LongTensor(valid_t).to(device)
+            item_idx_t = torch.LongTensor(item_lists_t).to(device)
+            logits_T_ref = t_scores_sample[valid_t_idx].gather(1, item_idx_t) / temperature
+            log_denom = torch.logsumexp(logits_T_ref, dim=1, keepdim=True)
+            d_pos_T_ref = torch.exp(logits_T_ref[:, 0:1] - log_denom).mean().detach()
+        else:
+            d_pos_T_ref = torch.tensor(0.5, device=device)
+    else:
+        d_pos_T_ref = torch.tensor(0.5, device=device)
+
+    # --- Step 4: Compute adaptive weights αm (Eq. 14) ---
+    # αm = exp(-|d^{+S}_m - d^{+T}|) / Σ_k exp(-|d^{+S}_k - d^{+T}|)
+    market_names = list(market_d_pos_S.keys())
+    if len(market_names) == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    alpha_scores = []
+    for m_name in market_names:
+        diff = torch.abs(market_d_pos_S[m_name] - d_pos_T_ref)
+        alpha_scores.append(-diff)
+
+    alpha_scores = torch.stack(alpha_scores)
+    alphas = F.softmax(alpha_scores, dim=0)  # (n_markets,)
+
+    # --- Step 5: Weighted sum (Eq. 15) ---
+    total = torch.tensor(0.0, device=device, requires_grad=True)
+    for i, market_name in enumerate(market_names):
+        total = total + alphas[i] * market_losses[i]
+
+    return total
 
 
 # =========================================================================
@@ -303,7 +432,7 @@ def total_loss(l_bpr: torch.Tensor, l_wrd: torch.Tensor,
     l_amrdd : scalar Tensor
     alpha, beta, gamma : float
         Balancing hyperparameters.  Typical starting values:
-        α = 1.0, β = 0.5, γ = 0.5  (from paper defaults).
+        α = 0.5, β = 1.0, γ = 1.0  (from paper defaults).
 
     Returns
     -------

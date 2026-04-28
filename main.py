@@ -55,9 +55,9 @@ from trainer import PreTrainer, TeacherTrainer, StudentTrainer
 # EASY-ACCESS DEFAULTS  (modify these to avoid typing CLI args)
 # =====================================================================
 DEFAULT_PRETRAIN_EPOCHS  = 300
-DEFAULT_TEACHER_EPOCHS   = 200
+DEFAULT_TEACHER_EPOCHS   = 400
 DEFAULT_STUDENT_EPOCHS   = 300
-DEFAULT_EVAL_EVERY       = 5
+DEFAULT_EVAL_EVERY       = 10
 
 
 # =====================================================================
@@ -204,6 +204,9 @@ def parse_args():
     # ---- AMRDD hyperparameters ----
     parser.add_argument("--amrdd_temp", type=float, default=1.0,
                         help="Softmax temperature for AMRDD")
+    parser.add_argument("--source_batch_size", type=int, default=16,
+                        help="Users per source market per batch for AMRDD. "
+                             "Set to 8 for lower memory usage.")
 
     # ---- Evaluation ----
     parser.add_argument("--k_list", type=int, nargs="+", default=[10, 20],
@@ -368,7 +371,8 @@ def main():
     # parameters.  The loss combines:
     #   •  BPR   –  direct supervision from target market labels
     #   •  WRD   –  global ranking distillation from the teacher
-    #   •  AMRDD –  fine-grained distributional distillation
+    #   •  AMRDD –  adaptive market-aware distillation with per-source
+    #              market batches and αm weights (Paper Eq. 14-15)
     # ==================================================================
     print("\n" + "=" * 60)
     print("STEP 4:  Training student (prompts) with distillation")
@@ -405,6 +409,7 @@ def main():
             teacher_model=teacher,
             target_adj=data["target_adj_train"],
             target_interactions=data["target_train_interactions"],
+            source_market_interactions=data["source_market_interactions"],
             n_items=n_items,
             alpha=args.alpha,
             beta=args.beta,
@@ -413,6 +418,7 @@ def main():
             wrd_lambda=args.wrd_lambda,
             wrd_mu=args.wrd_mu,
             amrdd_temperature=args.amrdd_temp,
+            source_batch_size=args.source_batch_size,
             lr=args.student_lr,
             device=device,
         )
