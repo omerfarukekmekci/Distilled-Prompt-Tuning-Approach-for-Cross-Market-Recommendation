@@ -96,52 +96,43 @@ class PromptModule(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # ATTENTION PROJECTIONS
+        # ATTENTION VECTORS
         # ------------------------------------------------------------------
-        # W_q  projects the frozen embedding into "query" space.
-        # W_k  projects each prompt vector into "key" space.
-        # We share the same key projection across all prompts (it's a
-        # standard linear layer applied to each prompt independently).
+        # a_k projects the node's input feature vector to compute attention
+        # weights. There is one vector per basis prompt.
         # ------------------------------------------------------------------
         # For users
-        self.user_query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.user_key_proj   = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.user_attention_vecs = nn.Parameter(
+            torch.randn(n_prompts, embed_dim) * 0.1
+        )
 
         # For items
-        self.item_query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.item_key_proj   = nn.Linear(embed_dim, embed_dim, bias=False)
-
-        # Scaling factor for dot-product attention (√d)
-        self.scale = embed_dim ** 0.5
+        self.item_attention_vecs = nn.Parameter(
+            torch.randn(n_prompts, embed_dim) * 0.1
+        )
 
     # ------------------------------------------------------------------
     # INTERNAL:  compute attention-weighted prompt for one entity type
     # ------------------------------------------------------------------
     def _attention_prompt(self, frozen_emb: torch.Tensor,
                           prompt_bank: nn.Parameter,
-                          query_proj: nn.Linear,
-                          key_proj: nn.Linear) -> torch.Tensor:
+                          attention_vecs: nn.Parameter) -> torch.Tensor:
         """
         Parameters
         ----------
         frozen_emb : Tensor (batch, dim)
             The frozen backbone embeddings for a batch of entities.
         prompt_bank : Parameter (n_prompts, dim)
-        query_proj, key_proj : nn.Linear
+        attention_vecs : Parameter (n_prompts, dim)
 
         Returns
         -------
         prompt_vectors : Tensor (batch, dim)
             The attention-weighted prompt to ADD to the frozen embedding.
         """
-        # Query: project each entity embedding  →  (batch, dim)
-        Q = query_proj(frozen_emb)
-
-        # Key: project each prompt in the bank  →  (n_prompts, dim)
-        K = key_proj(prompt_bank)
-
-        # Attention scores:  (batch, dim) × (dim, n_prompts) = (batch, n_prompts)
-        attn_scores = (Q @ K.t()) / self.scale
+        # Attention scores: (batch, dim) @ (dim, n_prompts) = (batch, n_prompts)
+        # α_{n,k} = exp(a_k^T · e_n) / Σ_{l} exp(a_l^T · e_n)
+        attn_scores = frozen_emb @ attention_vecs.t()
 
         # Softmax over the prompt dimension → attention weights
         attn_weights = F.softmax(attn_scores, dim=-1)  # (batch, n_prompts)
@@ -175,13 +166,11 @@ class PromptModule(nn.Module):
         """
         # Compute attention-weighted prompts for every user
         user_prompts = self._attention_prompt(
-            user_emb, self.user_prompt_bank,
-            self.user_query_proj, self.user_key_proj
+            user_emb, self.user_prompt_bank, self.user_attention_vecs
         )
         # Compute attention-weighted prompts for every item
         item_prompts = self._attention_prompt(
-            item_emb, self.item_prompt_bank,
-            self.item_query_proj, self.item_key_proj
+            item_emb, self.item_prompt_bank, self.item_attention_vecs
         )
 
         # Add prompts to frozen embeddings (the "injection" step)
@@ -189,3 +178,36 @@ class PromptModule(nn.Module):
         item_emb_prompted = item_emb + item_prompts
 
         return user_emb_prompted, item_emb_prompted
+
+    # ------------------------------------------------------------------
+    # COMPUTE PROMPTS ONLY  (for paper-correct pre-GCN injection)
+    # ------------------------------------------------------------------
+    def compute_prompts(self, user_emb: torch.Tensor,
+                        item_emb: torch.Tensor):
+        """
+        Compute prompt vectors WITHOUT adding them to embeddings.
+
+        This is used for the paper's prompt injection strategy where
+        prompts are added to initial (layer-0) embeddings BEFORE GCN
+        propagation:
+
+            X'_T = X_T + ψ(X_T)         ← prompts added here
+            E_final = GCN(A_T, X'_T)     ← then propagated through GNN
+
+        Parameters
+        ----------
+        user_emb : Tensor (n_users, dim) – initial (layer-0) user embeddings
+        item_emb : Tensor (n_items, dim) – initial (layer-0) item embeddings
+
+        Returns
+        -------
+        user_prompts : Tensor (n_users, dim) – prompt vectors for users
+        item_prompts : Tensor (n_items, dim) – prompt vectors for items
+        """
+        user_prompts = self._attention_prompt(
+            user_emb, self.user_prompt_bank, self.user_attention_vecs
+        )
+        item_prompts = self._attention_prompt(
+            item_emb, self.item_prompt_bank, self.item_attention_vecs
+        )
+        return user_prompts, item_prompts

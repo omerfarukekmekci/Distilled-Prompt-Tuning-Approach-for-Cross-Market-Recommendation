@@ -19,6 +19,7 @@ Together they give a balanced picture of recommendation quality.
 """
 
 import math
+import random
 
 import torch
 import numpy as np
@@ -128,7 +129,8 @@ def ndcg_at_k(predicted_items: list, ground_truth: set, k: int) -> float:
 # =========================================================================
 
 def evaluate_model(model, adj, test_dict, n_items, k_list,
-                   train_interactions=None, prompt_module=None,
+                   train_interactions=None, val_dict=None,
+                   prompt_module=None,
                    batch_size=256, device="cpu"):
     """
     Evaluate a recommendation model on held-out test data.
@@ -157,6 +159,9 @@ def evaluate_model(model, adj, test_dict, n_items, k_list,
     train_interactions : list of (user, item), optional
         If provided, these items are masked out during evaluation to
         prevent information leakage.
+    val_dict : dict[int, list[int]], optional
+        Validation ground truth - also masked during TEST evaluation
+        to prevent information leakage (standard practice).
     prompt_module : PromptModule, optional
         If provided, prompts are injected into embeddings (for student eval).
     batch_size : int
@@ -174,18 +179,47 @@ def evaluate_model(model, adj, test_dict, n_items, k_list,
         prompt_module.eval()
 
     with torch.no_grad():
-        # Step 1: get all embeddings from the model
-        user_emb, item_emb = model(adj.to(device))
-
-        # Inject prompts if we're evaluating the student
         if prompt_module is not None:
-            user_emb, item_emb = prompt_module(user_emb, item_emb)
+            # ---------------------------------------------------------
+            # Paper-correct prompt injection: BEFORE GCN propagation
+            #
+            #   X'_T = X_T + ψ(X_T)           ← add prompts to initials
+            #   E_final = GCN(A_T, X'_T)       ← propagate through GNN
+            #
+            # This matches the training procedure in StudentTrainer.
+            # ---------------------------------------------------------
+            # Get initial (layer-0) embeddings
+            init_user = model.user_embedding.weight
+            init_item = model.item_embedding.weight
 
-    # Build set of training items per user (for masking)
-    user_train_items = defaultdict(set)
+            # Compute attention-based prompts from initials
+            user_prompts, item_prompts = prompt_module.compute_prompts(
+                init_user, init_item
+            )
+
+            # Create prompted initial embeddings
+            prompted_init = torch.cat([
+                init_user + user_prompts,
+                init_item + item_prompts
+            ], dim=0)
+
+            # Run GCN propagation with prompted embeddings
+            user_emb, item_emb = model.propagate(
+                prompted_init, adj.to(device)
+            )
+        else:
+            # Step 1: get all embeddings from the model (no prompts)
+            user_emb, item_emb = model(adj.to(device))
+
+    # Build set of known items per user (for masking: train + val)
+    user_known_items = defaultdict(set)
     if train_interactions is not None:
         for u, i in train_interactions:
-            user_train_items[u].add(i)
+            user_known_items[u].add(i)
+    if val_dict is not None:
+        for u, items in val_dict.items():
+            for i in items:
+                user_known_items[u].add(i)
 
     # Prepare test users
     test_users = list(test_dict.keys())
@@ -205,11 +239,11 @@ def evaluate_model(model, adj, test_dict, n_items, k_list,
         # Scores against ALL items:  (batch, n_items)
         scores = model.get_scores(batch_user_emb, item_emb)
 
-        # Mask out training items by setting their scores to -inf
+        # Mask out known items (train + val) by setting scores to -inf
         for idx, u in enumerate(batch_users):
-            if u in user_train_items:
-                train_items = list(user_train_items[u])
-                scores[idx, train_items] = float("-inf")
+            if u in user_known_items:
+                known_items = list(user_known_items[u])
+                scores[idx, known_items] = float("-inf")
 
         # Get top-max(k_list) items
         max_k = max(k_list)
@@ -229,3 +263,157 @@ def evaluate_model(model, adj, test_dict, n_items, k_list,
     metrics = {key: float(np.mean(vals)) for key, vals in results.items()}
 
     return metrics
+
+
+# =========================================================================
+# 4.  SAMPLED EVALUATION  (paper-compatible: 1 positive + 99 negatives)
+# =========================================================================
+
+def evaluate_model_sampled(model, adj, test_dict, n_items, k_list,
+                           train_interactions=None, val_dict=None, prompt_module=None,
+                           n_neg=99, batch_size=256, device="cpu",
+                           seed=42):
+    """
+    Sampled evaluation matching FOREC / DCMPT protocol.
+
+    For each test user:
+        1. Take ONE positive test item
+        2. Sample `n_neg` random items the user hasn't interacted with
+        3. Score only these (1 + n_neg) candidate items
+        4. Rank and compute Recall@K / NDCG@K
+
+    This is MUCH easier than full-ranking (100 items vs 24K), so
+    metric values are naturally ~2x higher and directly comparable
+    to Table 1 in the DCMPT paper.
+
+    Parameters
+    ----------
+    n_neg : int
+        Number of negative samples per user (default: 99, standard in CMR).
+    seed : int
+        Random seed for reproducible negative sampling.
+    (other params identical to evaluate_model)
+
+    Returns
+    -------
+    metrics : dict
+        Keys like "Recall@10", "NDCG@10", etc.
+    """
+    model.eval()
+    if prompt_module is not None:
+        prompt_module.eval()
+
+    rng = random.Random(seed)
+
+    with torch.no_grad():
+        if prompt_module is not None:
+            # Paper-correct prompt injection: BEFORE GCN propagation
+            init_user = model.user_embedding.weight
+            init_item = model.item_embedding.weight
+            user_prompts, item_prompts = prompt_module.compute_prompts(
+                init_user, init_item
+            )
+            prompted_init = torch.cat([
+                init_user + user_prompts,
+                init_item + item_prompts
+            ], dim=0)
+            user_emb, item_emb = model.propagate(
+                prompted_init, adj.to(device)
+            )
+        else:
+            user_emb, item_emb = model(adj.to(device))
+
+    # Build set of ALL interacted items per user (train + val + test)
+    user_all_items = defaultdict(set)
+    if train_interactions is not None:
+        for u, i in train_interactions:
+            user_all_items[u].add(i)
+    if val_dict is not None:
+        for u, items in val_dict.items():
+            for i in items:
+                user_all_items[u].add(i)
+    # Also add test items to the "known" set for negative sampling
+    for u, items in test_dict.items():
+        for i in items:
+            user_all_items[u].add(i)
+
+    # Prepare result accumulators
+    results = {f"Recall@{k}": [] for k in k_list}
+    results.update({f"NDCG@{k}": [] for k in k_list})
+
+    all_items_set = set(range(n_items))
+
+    for u, pos_items in test_dict.items():
+        if len(pos_items) == 0:
+            continue
+
+        # Take ONE positive item (first one in the list)
+        pos_item = pos_items[0]
+
+        # Sample n_neg negatives (items user hasn't interacted with)
+        neg_pool = list(all_items_set - user_all_items[u])
+        if len(neg_pool) < n_neg:
+            neg_items = neg_pool
+        else:
+            neg_items = rng.sample(neg_pool, n_neg)
+
+        # Candidate set: 1 positive + n_neg negatives
+        candidates = [pos_item] + neg_items
+        candidate_ids = torch.LongTensor(candidates).to(device)
+
+        # Score only the candidates
+        u_emb = user_emb[u].unsqueeze(0)  # (1, dim)
+        c_emb = item_emb[candidate_ids]   # (n_candidates, dim)
+        scores = (u_emb * c_emb).sum(dim=-1)  # (n_candidates,)
+
+        # Rank candidates by score (descending)
+        _, sorted_indices = scores.sort(descending=True)
+        ranked_items = candidate_ids[sorted_indices].cpu().tolist()
+
+        # Ground truth: the positive item
+        gt = {pos_item}
+
+        for k in k_list:
+            results[f"Recall@{k}"].append(recall_at_k(ranked_items, gt, k))
+            results[f"NDCG@{k}"].append(ndcg_at_k(ranked_items, gt, k))
+
+    metrics = {key: float(np.mean(vals)) for key, vals in results.items()}
+    return metrics
+
+
+# =========================================================================
+# 5.  DUAL EVALUATION  (both full-ranking and sampled)
+# =========================================================================
+
+def evaluate_model_both(model, adj, test_dict, n_items, k_list,
+                        train_interactions=None, val_dict=None, prompt_module=None,
+                        n_neg=99, batch_size=256, device="cpu"):
+    """
+    Run both evaluation protocols and return combined results.
+
+    Returns
+    -------
+    dict with keys like:
+        "full/Recall@10", "full/NDCG@10",
+        "sampled/Recall@10", "sampled/NDCG@10"
+    """
+    full_metrics = evaluate_model(
+        model, adj, test_dict, n_items, k_list,
+        train_interactions=train_interactions, val_dict=val_dict,
+        prompt_module=prompt_module,
+        batch_size=batch_size, device=device,
+    )
+    sampled_metrics = evaluate_model_sampled(
+        model, adj, test_dict, n_items, k_list,
+        train_interactions=train_interactions, val_dict=val_dict,
+        prompt_module=prompt_module,
+        n_neg=n_neg, batch_size=batch_size, device=device,
+    )
+
+    combined = {}
+    for k, v in full_metrics.items():
+        combined[f"full/{k}"] = v
+    for k, v in sampled_metrics.items():
+        combined[f"sampled/{k}"] = v
+
+    return combined

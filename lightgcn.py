@@ -122,6 +122,57 @@ class LightGCN(nn.Module):
         return user_emb_final, item_emb_final
 
     # -----------------------------------------------------------------
+    # PROPAGATE  (for student: runs GCN on external initial embeddings)
+    # -----------------------------------------------------------------
+    def propagate(self, initial_emb: torch.Tensor,
+                  adj: torch.sparse.FloatTensor):
+        """
+        Run GCN propagation layers on externally provided initial embeddings.
+
+        This is used by the student model to propagate prompt-modified
+        embeddings through the GNN.  The paper injects prompts BEFORE
+        GCN propagation:
+
+            X'_T = X_T + ψ(X_T)
+            E_final = GCN(A_T, X'_T)
+
+        Since LightGCN has no learnable weight matrices or activations,
+        the propagation is a **linear** operation.  This means:
+
+            GCN(X + ψ) = GCN(X) + GCN(ψ)
+
+        So we can propagate JUST the prompts and add to the precomputed
+        base embeddings, enabling efficient per-epoch computation.
+
+        Parameters
+        ----------
+        initial_emb : Tensor (n_users + n_items, embed_dim)
+            The initial embeddings (e.g. prompt-only vectors, or
+            full prompted embeddings X + ψ).
+        adj : torch.sparse.FloatTensor
+            Normalised adjacency matrix.
+
+        Returns
+        -------
+        user_emb_final : Tensor (n_users, embed_dim)
+        item_emb_final : Tensor (n_items, embed_dim)
+        """
+        layer_embeddings = [initial_emb]
+
+        current_emb = initial_emb
+        for _ in range(self.n_layers):
+            current_emb = torch.sparse.mm(adj, current_emb)
+            layer_embeddings.append(current_emb)
+
+        stacked = torch.stack(layer_embeddings, dim=0)
+        final_emb = stacked.mean(dim=0)
+
+        user_emb_final = final_emb[:self.n_users]
+        item_emb_final = final_emb[self.n_users:]
+
+        return user_emb_final, item_emb_final
+
+    # -----------------------------------------------------------------
     # SCORING
     # -----------------------------------------------------------------
     def get_scores(self, user_emb: torch.Tensor,

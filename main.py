@@ -39,6 +39,7 @@ To force re-training, either delete the checkpoint files or pass
 """
 
 import argparse
+import json
 import os
 import torch
 import time
@@ -155,9 +156,10 @@ def parse_args():
                         help="Embedding dimensionality for LightGCN")
     parser.add_argument("--n_layers", type=int, default=3,
                         help="Number of LightGCN propagation layers")
-    parser.add_argument("--n_prompts", type=int, default=4,
-                        help="Number of prompt vectors per entity type "
-                             "(user/item)")
+    parser.add_argument("--n_prompts", type=int, default=10,
+                        help="Number of prompt basis vectors per entity type "
+                             "(user/item). Paper Fig.5: ~10 for rich markets, "
+                             "~20 for sparse markets.")
 
     # ---- Pre-training ----
     parser.add_argument("--pretrain_epochs", type=int, default=DEFAULT_PRETRAIN_EPOCHS,
@@ -184,11 +186,11 @@ def parse_args():
                         help="Batch size for student (paper uses 16 users per batch)")
 
     # ---- Loss weights  (L_total = α·BPR + β·WRD + γ·AMRDD) ----
-    parser.add_argument("--alpha", type=float, default=1.0,
-                        help="Weight for BPR loss")
-    parser.add_argument("--beta", type=float, default=0.5,
+    parser.add_argument("--alpha", type=float, default=0.5,
+                        help="Weight for BPR loss (paper: 0.5 optimal)")
+    parser.add_argument("--beta", type=float, default=1.0,
                         help="Weight for WRD loss")
-    parser.add_argument("--gamma", type=float, default=0.5,
+    parser.add_argument("--gamma", type=float, default=1.0,
                         help="Weight for AMRDD loss")
 
     # ---- WRD hyperparameters ----
@@ -386,12 +388,13 @@ def main():
         print("  Loaded student prompts from checkpoint")
         prompt_module = prompt_module.to(device)
         # Still run evaluation even if loaded from checkpoint
-        from evaluate import evaluate_model
-        final_metrics = evaluate_model(
+        from evaluate import evaluate_model_both
+        final_metrics = evaluate_model_both(
             backbone, data["target_adj_train"].to(device),
             data["target_test"], n_items,
             args.k_list,
             train_interactions=data["target_train_interactions"],
+            val_dict=data["target_val"],
             prompt_module=prompt_module,
             device=device,
         )
@@ -431,16 +434,138 @@ def main():
         save_checkpoint(prompt_module, args.checkpoint_dir, student_ckpt)
 
     # ==================================================================
-    # STEP 5:  PRINT FINAL RESULTS
+    # STEP 5:  FINAL EVALUATION + BASELINE + RESULTS SAVING
     # ==================================================================
     total_elapsed = time.time() - pipeline_start
 
     if final_metrics:
-        print("\n" + "=" * 60)
-        print("FINAL EVALUATION RESULTS")
-        print("=" * 60)
-        for metric_name, value in final_metrics.items():
-            print(f"  {metric_name:15s} = {value:.4f}")
+        from evaluate import evaluate_model_both
+
+        # ---- Baseline: backbone WITHOUT prompts ----
+        print("\n  Evaluating baseline (backbone only, no prompts)...")
+        baseline_metrics = evaluate_model_both(
+            backbone, data["target_adj_train"].to(device),
+            data["target_test"], n_items,
+            args.k_list,
+            train_interactions=data["target_train_interactions"],
+            val_dict=data["target_val"],
+            prompt_module=None,
+            device=device,
+        )
+
+        # ---- Re-evaluate with val masking for fair comparison ----
+        print("  Evaluating DCMPT (backbone + prompts)...")
+        final_metrics = evaluate_model_both(
+            backbone, data["target_adj_train"].to(device),
+            data["target_test"], n_items,
+            args.k_list,
+            train_interactions=data["target_train_interactions"],
+            val_dict=data["target_val"],
+            prompt_module=prompt_module,
+            device=device,
+        )
+
+        # ---- Print results ----
+        paper_de = {"Recall@10": 0.5365, "Recall@20": None,
+                    "NDCG@10": 0.3898, "NDCG@20": None}
+        paper_base_de = {"Recall@10": 0.1958, "Recall@20": None,
+                         "NDCG@10": 0.1389, "NDCG@20": None}
+
+        for protocol in ["sampled", "full"]:
+            print("\n" + "=" * 60)
+            if protocol == "sampled":
+                print("FINAL EVALUATION RESULTS (Sampled 1+99)")
+            else:
+                print("FINAL EVALUATION RESULTS (Full Ranking)")
+            print("=" * 60)
+
+            print(f"\n  {'Metric':<15} {'Baseline':>10} {'DCMPT':>10} {'Delta':>10} {'Paper':>10} {'PaperBase':>10}")
+            print(f"  {'-'*65}")
+
+            for metric in ["NDCG@10", "Recall@10", "NDCG@20", "Recall@20"]:
+                key = f"{protocol}/{metric}"
+                base_val = baseline_metrics.get(key, 0.0)
+                dcmpt_val = final_metrics.get(key, 0.0)
+                if base_val == 0.0 and dcmpt_val == 0.0:
+                    continue
+                
+                delta = dcmpt_val - base_val
+                delta_str = f"+{delta:.4f}" if delta >= 0 else f"{delta:.4f}"
+                
+                if protocol == "sampled":
+                    paper_val = paper_de.get(metric)
+                    paper_str = f"{paper_val:.4f}" if paper_val else "---"
+                    paper_base_val = paper_base_de.get(metric)
+                    paper_base_str = f"{paper_base_val:.4f}" if paper_base_val else "---"
+                else:
+                    paper_str = "---"
+                    paper_base_str = "---"
+                    
+                print(f"  {metric:<15} {base_val:>10.4f} {dcmpt_val:>10.4f} "
+                      f"{delta_str:>10} {paper_str:>10} {paper_base_str:>10}")
+
+            base_ndcg = baseline_metrics.get(f"{protocol}/NDCG@{min(args.k_list)}", 0)
+            dcmpt_ndcg = final_metrics.get(f"{protocol}/NDCG@{min(args.k_list)}", 0)
+            if base_ndcg > 0:
+                improvement = (dcmpt_ndcg - base_ndcg) / base_ndcg * 100
+                print(f"\n  Prompt contribution: NDCG@{min(args.k_list)} "
+                      f"+{improvement:.1f}% over baseline")
+
+        # ---- Results saving ----
+        from datetime import datetime
+        results_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "results"
+        )
+        os.makedirs(results_dir, exist_ok=True)
+
+        src_tag = "_".join(sorted(args.source_markets))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_file = os.path.join(
+            results_dir,
+            f"run_{src_tag}_to_{args.target_market}_{args.category}_{timestamp}.json"
+        )
+
+        result_data = {
+            "timestamp": timestamp,
+            "source_markets": sorted(args.source_markets),
+            "target_market": args.target_market,
+            "category": args.category,
+            "config": {
+                "embed_dim": args.embed_dim,
+                "n_layers": args.n_layers,
+                "n_prompts": args.n_prompts,
+                "alpha": args.alpha,
+                "beta": args.beta,
+                "gamma": args.gamma,
+                "student_lr": args.student_lr,
+                "student_batch": args.student_batch,
+                "student_epochs": args.student_epochs,
+                "wrd_K": args.wrd_K,
+                "wrd_lambda": args.wrd_lambda,
+                "wrd_mu": args.wrd_mu,
+                "amrdd_temp": args.amrdd_temp,
+                "pretrain_epochs": args.pretrain_epochs,
+                "teacher_epochs": args.teacher_epochs,
+            },
+            "data_stats": {
+                "n_users": n_users,
+                "n_items": n_items,
+                "combined_edges": len(data["combined_interactions"]),
+                "target_train_edges": len(data["target_train_interactions"]),
+                "val_users": len(data["target_val"]),
+                "test_users": len(data["target_test"]),
+            },
+            "metrics": {
+                "baseline": baseline_metrics,
+                "dcmpt": final_metrics,
+            },
+            "total_time_seconds": round(total_elapsed, 1),
+        }
+
+        with open(result_file, "w", encoding="utf-8") as f:
+            json.dump(result_data, f, indent=2, ensure_ascii=False)
+
+        print(f"\n  Results saved to {result_file}")
     else:
         print("\n  No test data provided — skipping final evaluation.")
 

@@ -79,6 +79,7 @@ class PreTrainer:
         self.interactions = combined_interactions
         self.n_items = n_items
         self.device = device
+        self.weight_decay = weight_decay
 
         # Adam is the standard optimiser used in recommendation GNN papers.
         # weight_decay adds implicit L2 regularisation on all parameters.
@@ -142,7 +143,7 @@ class PreTrainer:
 
             # BPR loss + L2 regularisation on active base embeddings
             loss = bpr_loss(pos_scores, neg_scores)
-            reg = self.model.reg_loss(users, pos_items) * 1e-4
+            reg = self.model.reg_loss(users, pos_items) * self.weight_decay
 
             total = loss + reg
 
@@ -225,6 +226,7 @@ class TeacherTrainer:
         self.interactions = target_interactions
         self.n_items = n_items
         self.device = device
+        self.weight_decay = weight_decay
 
         self.optimizer = optim.Adam(
             model.parameters(), lr=lr, weight_decay=weight_decay
@@ -265,7 +267,7 @@ class TeacherTrainer:
             neg_scores = (u_emb * neg_emb).sum(dim=-1)
 
             loss = bpr_loss(pos_scores, neg_scores)
-            reg = self.model.reg_loss(users, pos_items) * 1e-4
+            reg = self.model.reg_loss(users, pos_items) * self.weight_decay
 
             total = loss + reg
 
@@ -396,6 +398,13 @@ class StudentTrainer:
     def train_epoch(self, batch_size: int = 1024):
         """
         Train the PromptModule (frozen backbone, frozen teacher).
+
+        Paper-correct architecture:
+            1. Get initial (layer-0) embeddings from frozen backbone
+            2. Compute prompts ψ from initial embeddings (attention-based)
+            3. Propagate prompts through GCN: GCN(ψ)
+            4. Student embeddings = GCN(X) + GCN(ψ)  (by linearity)
+            5. Compute losses and backprop through prompt parameters
         """
         self.prompt_module.train()
 
@@ -404,38 +413,63 @@ class StudentTrainer:
         total_loss_val = 0.0
         n_batches = 0
 
-        # -------------------------------------------------------------
-        # PERFORMANCE FIX: Backbone and Teacher are completely frozen!
-        # Do not recalculate the graph propagation inside the batch loop.
-        # We compute them exactly once per epoch.
-        # -------------------------------------------------------------
+        # =============================================================
+        # STEP A: Get FROZEN base embeddings (no grad)
+        # =============================================================
         with torch.no_grad():
+            # Base GCN output:  GCN(X)  — precomputed, detached
             base_user_emb, base_item_emb = self.backbone(self.adj)
+
+            # Initial (layer-0) embeddings for prompt attention input
+            init_user = self.backbone.user_embedding.weight.detach()
+            init_item = self.backbone.item_embedding.weight.detach()
+
+            # Teacher embeddings (completely frozen)
             teacher_user_emb, teacher_item_emb = self.teacher(self.adj)
 
-        # Batch size can be moderate here because we evaluate Full WRD
-        batch_size = max(batch_size, 1024)
+        # =============================================================
+        # STEP B: Batch training loop
+        #
+        # For each batch, we recompute prompts and GCN propagation.
+        # This is necessary because optimizer.step() modifies prompt
+        # parameters in-place, invalidating any retained computation
+        # graph.  The overhead is minimal (~10ms per batch for prompt
+        # attention + 3 GCN sparse matmuls on GPU).
+        #
+        # Paper architecture per batch:
+        #   1. ψ = PromptModule(X_init)           — attention-based prompts
+        #   2. X'_T = X_init + ψ                  — add prompts to initial embeddings
+        #   3. E_student = GCN(X'_T)              — propagate through GCN
+        #   4. Compute losses & backprop
+        # =============================================================
+        batch_starts = list(range(0, len(self.train_users), batch_size))
 
-        for start in range(0, len(self.train_users), batch_size):
+        for batch_idx, start in enumerate(batch_starts):
             batch_users = self.train_users[start : start + batch_size]
             user_ids = torch.LongTensor(batch_users).to(self.device)
 
-            # 1. Base batch users
-            batch_base_user = base_user_emb[user_ids]
-
-            # 2. Inject prompts
-            # We ONLY compute user prompts for this batch's users! Saves
-            # allocating/processing 3M+ user prompts needlessly.
-            # We do need prompts for ALL items for the WRD/AMRDD distillation matrices.
-            batch_student_user, student_item_emb = self.prompt_module(
-                batch_base_user, base_item_emb
+            # ---- Fresh prompt computation (with gradients) ----
+            user_prompts, item_prompts = self.prompt_module.compute_prompts(
+                init_user, init_item
+            )
+            
+            # Paper-correct injection: add prompts BEFORE propagation
+            prompted_init = torch.cat([
+                init_user + user_prompts,
+                init_item + item_prompts
+            ], dim=0)
+            
+            # Student embeddings = propagated prompted embeddings
+            student_user_emb, student_item_emb = self.backbone.propagate(
+                prompted_init, self.adj
             )
 
-            # 3. Teacher batch users
+            # Batch slices
+            batch_student_user = student_user_emb[user_ids]
             batch_teacher_user = teacher_user_emb[user_ids]
 
             # ----------------------------------------------------------
-            # BPR Loss (Iterating locally helps indexing on Python side)
+            # BPR Loss
             # ----------------------------------------------------------
             bpr_pos_scores = []
             bpr_neg_scores = []
@@ -488,7 +522,7 @@ class StudentTrainer:
 
             l_amrdd = amrdd_loss(
                 student_scores, teacher_scores.detach(),
-                pos_mask, temperature=self.amrdd_temperature
+                pos_mask, K=self.K, temperature=self.amrdd_temperature
             )
 
             # ----------------------------------------------------------
@@ -538,7 +572,7 @@ class StudentTrainer:
         best_epoch = 0
         best_prompt_state = None
         patience_counter = 0
-        patience = 30  # stop if no improvement for 30 epochs
+        patience = 10  # stop if no improvement for 10 epochs (paper value)
 
         for epoch in range(1, n_epochs + 1):
             t0 = time.time()
@@ -583,13 +617,13 @@ class StudentTrainer:
                     )
                     print(f"    [Val] {metrics_str}{marker}")
 
-                # Early stopping check
-                if patience_counter >= patience:
-                    if verbose:
-                        print(f"  ⚡ Early stopping at epoch {epoch} "
-                              f"(best was epoch {best_epoch}, "
-                              f"{ndcg_key}={best_ndcg:.4f})")
-                    break
+                # Early stopping check (DISABLED as per user request)
+                # if patience_counter >= patience:
+                #     if verbose:
+                #         print(f"  ⚡ Early stopping at epoch {epoch} "
+                #               f"(best was epoch {best_epoch}, "
+                #               f"{ndcg_key}={best_ndcg:.4f})")
+                #     break
 
         # Restore best prompt weights
         if best_prompt_state is not None:

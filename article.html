@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Breaking Down Market Barriers: Distilled Prompt-Tuning Approach for Cross-Market Recommendation</title>
+    <!-- MathJax for rendering LaTeX equations -->
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            }
+        };
+    </script>
+    <style>
+        body {
+            font-family: 'Times New Roman', Times, serif;
+            line-height: 1.6;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+            color: #222;
+            background-color: #fafafa;
+        }
+
+        .paper-container {
+            background-color: #fff;
+            padding: 3rem 4rem;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+            border-radius: 4px;
+        }
+
+        h1 {
+            text-align: center;
+            font-size: 2.2em;
+            margin-bottom: 0.5em;
+            line-height: 1.2;
+        }
+
+        .authors {
+            text-align: center;
+            font-size: 1.1em;
+            margin-bottom: 0.5em;
+        }
+
+        .affiliations {
+            text-align: center;
+            font-style: italic;
+            font-size: 0.9em;
+            margin-bottom: 0.5em;
+            color: #555;
+        }
+
+        .emails {
+            text-align: center;
+            font-size: 0.9em;
+            margin-bottom: 3em;
+            color: #444;
+        }
+
+        h2 {
+            font-size: 1.4em;
+            margin-top: 1.5em;
+            padding-bottom: 0.2em;
+            border-bottom: 1px solid #ddd;
+            text-transform: uppercase;
+        }
+
+        h3 {
+            font-size: 1.1em;
+            margin-top: 1.2em;
+            font-style: italic;
+        }
+
+        .abstract {
+            margin: 2em 10%;
+            font-size: 0.95em;
+        }
+
+        .abstract-title {
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 1em;
+            text-transform: uppercase;
+        }
+
+        p {
+            text-align: justify;
+            margin-bottom: 1em;
+        }
+
+        ul {
+            margin-bottom: 1em;
+        }
+
+        .figure-placeholder {
+            background: #f8f9fa;
+            border: 2px dashed #ccc;
+            padding: 3em 1em;
+            text-align: center;
+            margin: 2em 0;
+            color: #555;
+            border-radius: 4px;
+        }
+
+        .caption {
+            font-size: 0.9em;
+            text-align: center;
+            font-style: italic;
+            margin-top: 0.5em;
+            color: #444;
+        }
+
+        .equation {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 1.5em 0;
+            overflow-x: auto;
+        }
+
+        .equation-number {
+            margin-left: 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5em 0;
+            font-size: 0.85em;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 8px 4px;
+            text-align: center;
+        }
+
+        th {
+            background-color: #f5f5f5;
+            font-weight: bold;
+        }
+
+        .references p {
+            text-align: left;
+            margin-bottom: 0.8em;
+            font-size: 0.9em;
+            padding-left: 2em;
+            text-indent: -2em;
+        }
+
+        @media (max-width: 600px) {
+            .paper-container {
+                padding: 1rem;
+            }
+
+            .abstract {
+                margin: 1em 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="paper-container">
+        <h1>Breaking Down Market Barriers: Distilled Prompt-Tuning Approach for Cross-Market Recommendation</h1>
+
+        <div class="authors">
+            Leqi Zhang¹, Wayne Lu¹, Haiyang Zhang¹, Elliott Wen², Zhixuan Liang³, Jia Wang¹*
+        </div>
+
+        <div class="affiliations">
+            ¹Xi'an Jiaotong-Liverpool University, Suzhou, China<br>
+            ²University of Auckland, Auckland, New Zealand<br>
+            ³The Hong Kong Polytechnic University, Hong Kong SAR, China
+        </div>
+
+        <div class="emails">
+            leqi.zhang23@student.xjtlu.edu.cn, lu.wayne0603@gmail.com,<br>
+            {jia.wang02, haiyang.zhang}@xjtlu.edu.cn,<br>
+            elliott.wen@auckland.ac.nz, zhixuan.liang@connect.polyu.hk
+        </div>
+
+        <div class="abstract">
+            <div class="abstract-title">Abstract</div>
+            <p>Cross-market recommendation (CMR) faces severe challenges from distribution shifts between data-rich
+                source markets and sparse target markets. Existing methods rely on a pre-training and fine-tuning
+                paradigm for knowledge transfer, yet suffer from two key limitations: i) the objective gap between
+                pre-training and full-parameter fine-tuning causes loss of generalized knowledge from source markets;
+                ii) the high computational costs of extensive fine-tuning hinder scalability. To this end, we propose
+                DCMPT, a novel Distilled Cross-Market Prompt-Tuning approach. DCMPT reframes the problem under a more
+                efficient pre-training and prompt-tuning paradigm. Instead of full fine-tuning, we adapt a pre-trained
+                universal backbone by freezing its weights and injecting a minimal set of learnable prompts to form a
+                "student" model. To effectively optimize these prompts on sparse data, we introduce a novel
+                teacher-student architecture: a specialized "teacher" model, trained exclusively on the target market,
+                provides dense, market-specific supervision. This guidance is delivered via a dual distillation strategy
+                designed to transfer global ranking patterns and adapt to local consumer tastes. Extensive experiments
+                on real-world market datasets demonstrate that DCMPT significantly outperforms state-of-the-art methods,
+                achieving superior target market performance with substantial parameter-efficiency.</p>
+        </div>
+
+        <h2>Introduction</h2>
+        <p>With the rapid expansion of globalization and e-commerce, online shopping platforms are increasingly tasked
+            with adapting their recommendation systems to diverse international markets. Traditional recommendation
+            models, while effective in the same scenarios (Wang et al. 2018) or homogeneous markets (Lu and Yin 2025;
+            Menglin et al. 2024; Cui et al. 2025), falter in cross-market scenarios where user behaviors, cultural
+            norms, and item attributes vary significantly (Lin et al. 2024; Bonab et al. 2021). For instance, a user's
+            preference for "holiday gifts" in Mexico might be shaped by local traditions like Day of the Dead, whereas
+            in Germany, it could be driven by Christmas customs. These cultural discrepancies lead to substantial
+            distribution shifts (Chen et al. 2023; Peng et al. 2025), enhancing data sparsity and cold-start problems
+            when attempting to transfer interaction patterns across markets.</p>
+
+        <p>Efforts to address these challenges have included cross-domain recommendation (CDR) methods, which aim to
+            bridge domain discrepancies through techniques like representation mapping (Li et al. 2024) or multi-task
+            learning (Yan et al. 2022). However, CDR typically assumes some overlap in users or stable preference
+            patterns across domains—assumptions that do not hold in cross-market settings where markets often lack
+            shared users and exhibit stark differences in item popularity and cultural contexts (Du et al. 2024; Bonab
+            et al. 2021). To better tackle these issues, cross-market recommendation (CMR) has emerged, employing a
+            pretraining-and-fine-tuning (PF) paradigm. In this approach, models are pretrained on data from source
+            markets and then fine-tuned for specific target markets (Wang et al. 2024). For example, FOREC pretrains a
+            neural matrix factorization model on source markets and fine-tunes it using market-specific multi-layer
+            perceptrons (MLPs) (Bonab et al. 2021).</p>
+
+        <div class="figure-placeholder">
+            [Görsel: Çapraz Pazar Önerisinde PF ve PP Modellerinin Karşılaştırması]
+        </div>
+        <div class="caption">Figure 1: (a). PF vs PP models in Cross-Market Recommendation. (b). Comparison between PF
+            and our PP approach in CMR. We evaluate these methods on three target markets (Germany, Mexico, the UK),
+            measuring recall@10 and parameter update volume.</div>
+
+        <p>Despite considerable progress, we argue that existing pre-training and finetuning paradigm suffers from
+            sub-optimal performance in CMR due to three limitations: First, they face a high risk of negative transfer.
+            The pre-training objective captures general patterns from source markets, which may misalign with the
+            fine-tuning goal of adapting to target-specific preferences, leading to knowledge forgetting or overfitting
+            to spurious correlations (Gao et al. 2025; Wang et al. 2019). Second, the fine-tuning process is
+            computationally prohibitive. Fine-tuning large models for each market incurs high computational and storage
+            costs, limiting scalability across many markets (Wang et al. 2025). Third, PF paradigm leads to static,
+            isolated models. Maintaining a separate fine-tuned model for each market hinders cross-market knowledge
+            sharing and increases deployment complexity. Fig. 1(a) illustrates differences between PF and our proposed
+            pretraining-then-prompt-tuning (PP) paradigm. To empirically illustrate these challenges, we compare three
+            PF-based methods with our PP approach across three target markets, evaluating recommendation performance and
+            the volume of parameter updates required, as shown in Fig. 1(b). The results highlight that PF methods
+            demand extensive parameter updates, increasing computational costs, and suffer from negative transfer due to
+            distribution mismatches between source and target markets.</p>
+
+        <p>To overcome these limitations, we propose DCMPT, a novel Distilled Cross-Market Prompt-Tuning approach. DCMPT
+            replaces the costly fine-tuning step with a more efficient pre-training and prompt-tuning (PP) paradigm.
+            Instead of updating the entire model, we freeze the powerful pre-trained backbone and inject a small set of
+            learnable prompts lightweight vectors added directly to user/item embeddings to steer the model's behavior
+            for the target market. To optimize these prompts with target data that provides weak supervision, we propose
+            a knowledge distillation architecture where a target-specific "teacher" model provides market-aware guidance
+            for training the "student" prompts. Specifically, we propose two novel distillation strategies to ensure the
+            prompts are optimized effectively: i) Weighted Ranking Distillation (WRD) guides prompt learning with
+            tailored weights to capture global ranking patterns, and ii) Adaptive Market-aware Ranking Decoupled
+            Distillation (AMRDD) provides nuanced and dynamic guidance to ensure the prompts align with target-specific
+            preferences.</p>
+
+        <h2>Related Work</h2>
+        <h3>Cross-Market Recommendation</h3>
+        <p>Cross-market recommendation (CMR) leverages existing user data and products from the source market to address
+            challenges such as data sparsity or cold-start in the target market, thereby enhancing the recommendation
+            accuracy and performance in the target market (Ozturk et al. 2024). There has been limited work on
+            cross-market recommendation, with the most relevant approaches being FOREC (Bonab et al. 2021), Bert4XMR (Hu
+            et al. 2024), and CAT-SR (Wang et al. 2024). They adopt a pretraining and fine-tuning paradigm to enhance
+            robustness against sparsity, noise, market bias via distinct techniques—meta-learning, contrastive learning,
+            and transferable attention, improving generalization. For instance, FOREC utilizes meta-learning to
+            pre-train a NeuMF model and fine-tunes it with an MLP to improve performance in the target market. However,
+            these approaches require heavy fine-tuning, incurring high computational costs and offering limited
+            adaptability.</p>
+
+        <h3>Prompt Learning</h3>
+        <p>Prompt-based learning adapts pre-trained models to downstream tasks with minimal parameter updates, gaining
+            traction in NLP (Gao, Fisch, and Chen 2020) and graph-based recommendation (Geng et al. 2022). Recent works
+            employ prompt embeddings to guide inter-domain knowledge transfer (Zhang et al. 2024a), contrastive
+            objectives to refine prompts (Yi, Ounis, and Macdonald 2023), or generative models for dynamic prompt
+            generation (Zhang et al. 2024b). Recent studies have begun to explore prompt-based learning in
+            recommendation systems, particularly within graph-structured models (Geng et al. 2022). Some work integrates
+            prompt embeddings or nodes into heterogeneous graphs to guide inter-domain knowledge transfer (Zhang et al.
+            2024a; Hao et al. 2024). However, applying prompt-tuning directly to CMR remains non-trivial due to sparse
+            supervision and significant market heterogeneity. To enhance prompt learning in CMR, we design a
+            distillation-enhanced prompt-tuning approach with two distillation strategies.</p>
+
+        <h2>Problem Formulation</h2>
+        <p>In this paper, we focus on addressing the ranking-based recommendation task in a cross-market setting. Let
+            $\mathcal{M} = \{M_{1},...,M_{a}\}$ be a set of $a$ markets. Let $U$ and $I$ be the global sets of users and
+            items, respectively. We make two standard assumptions: user sets are disjoint across markets (i.e.,
+            $U_{i}\cap U_{j}=\emptyset$ for $i\ne j$), and item sets are partially overlapping, where an item shared
+            across markets maintains a single, unified representation. Each market $M_{k}\in\mathcal{M}$ is represented
+            as a bipartite graph of interactions $\mathcal{G}_{k} = (U_{k},I_{k},\mathcal{E}_{k})$, where
+            $U_{k}\subseteq U$ and $I_{k}\subseteq I$ are the market-specific user and item sets, and $\mathcal{E}_{k}$
+            represents the observed interactions. We designate a single market as the target market, $M_{T}$, with its
+            graph $\mathcal{G}_{T}$, and the remaining $a-1$ as source markets $\{M_{S_{i}}\}$ with graphs
+            $\{\mathcal{G}_{S_{i}}\}$.</p>
+        <p><strong>Problem Definition.</strong> Given the set of all market interaction graphs
+            $\{\mathcal{G}_{S_{1}},...,\mathcal{G}_{S_{n-1}},\mathcal{G}_{T}\}$, our objective is to learn a model
+            $\mathcal{F}$ that, for each user $u\in U_{T}$, can generate an accurate and personalized ranked list of
+            items. The core challenge is to do so effectively and efficiently, mitigating the data sparsity of the
+            target market $M_{T}$.</p>
+
+        <h2>Methodology</h2>
+        <p>Contemporary CMR systems predominantly employ a pre-training and fine-tuning (PF) paradigm, where models
+            pretrained on multi-market data undergo full parameter updates during target adaptation. While effective in
+            knowledge transfer, this approach faces two critical limitations: (1) Distribution misalignment between
+            source and target markets induces negative transfer, and (2) Extensive parameter updates during fine-tuning
+            create an objective gap that discards valuable cross-market knowledge. By freezing the pre-trained backbone
+            and only tuning a small set of prompts, pre-training and prompt-tuning (PP) offers a parameter-efficient
+            solution that mitigates the objective gap (Tong et al. 2025). To further capture market-specific knowledge,
+            as illustrated in Fig. 2, our DCMPT operates in two stages: (1) Pre-training, where a backbone learns from
+            combined multi-market data, and (2) Target market adaptation, it introduces a target-specialized teacher
+            model $\mathcal{T}$ trained exclusively on target market data, guiding prompt learning (student) through
+            dual-task optimization of $\hat{y}_{stu}\Leftrightarrow y$ and
+            $\hat{y}_{stu}\Leftrightarrow\hat{y}_{\mathcal{T}}$.</p>
+
+        <div class="figure-placeholder">
+            [Görsel: DCMPT yöntemimize genel bakış]
+        </div>
+        <div class="caption">Figure 2: The overview of our method DCMPT, which consists of pretraining phase and target
+            market adaptation phase designed to enable efficient cross-market recommendation. In the adaptation phase,
+            learnable prompts are injected into the frozen backbone model and optimized through joint training loss to
+            tailor it for the target market.</div>
+
+        <div class="equation">
+            <div>
+                $$PF: \mathcal{F}(\mathcal{X}_{T}; \Theta = \mathcal{F}_{pre}(\mathcal{X}_{S\cup T}))
+                \xrightarrow[\text{Output}]{\text{Gradients}} (\hat{y} \Leftrightarrow y)$$
+            </div>
+            <div class="equation-number">(1)</div>
+        </div>
+        <div class="equation">
+            <div>
+                $$PP: \mathcal{F}(\mathcal{X}_{T} + \psi; \bar{\Theta} = \mathcal{F}_{pre}(\mathcal{X}_{S\cup T}))
+                \xrightarrow[\text{Output}]{\text{Gradients}} (\hat{y} \Leftrightarrow y)$$
+            </div>
+            <div class="equation-number">(2)</div>
+        </div>
+        <div class="equation">
+            <div>
+                $$\text{Ours}: \mathcal{F}_{stu}(\mathcal{X}_{T} + \psi; \bar{\Theta} =
+                \mathcal{F}_{pre}(\mathcal{X}_{S\cup T})) \xrightarrow[\text{Output}]{\text{Gradients}} \begin{cases}
+                \hat{y}_{stu} \Leftrightarrow y \\ \hat{y}_{stu} \Leftrightarrow \hat{y}_{\mathcal{T}} \end{cases}$$
+            </div>
+            <div class="equation-number">(3)</div>
+        </div>
+
+        <h3>Pre-training Phase</h3>
+        <p>The pretraining phase learns generalized user-item interaction patterns. It combines graphs from source
+            markets and the target market. We pretrain a LightGCN model on a combined graph $\mathcal{G}_{comb}$. This
+            graph integrates knowledge across multiple markets.</p>
+
+        <p><strong>Graph Concatenation and Node Alignment</strong> We construct $\mathcal{G}_{comb}$ by merging the
+            target market graph $\mathcal{G}_{T}$ with source market graphs $\{\mathcal{G}_{S_{i}}\}_{i=1}^{a-1}$.
+            Shared items across markets are aligned as identical nodes. This ensures structural consistency. Their
+            interactions are aggregated. Alignment uses a hash-based method with $O(N+E)$ complexity. This approach
+            scales efficiently to billion-node graphs. The combined graph is defined as:</p>
+        <div class="equation">
+            <div>
+                $$\mathcal{G}_{comb} = \left(U_{T}\cup\bigcup_{i=1}^{a-1}U_{S_{i}},
+                I_{T}\cup\bigcup_{i=1}^{a-1}I_{S_{i}},
+                \mathcal{E}_{T}\cup\bigcup_{i=1}^{a-1}\mathcal{E}_{S_{i}}\right)$$
+            </div>
+        </div>
+
+        <p><strong>LightGCN Pre-training</strong> On this global graph, we pre-train a LightGCN model to learn initial
+            embeddings. The objective is to capture universal collaborative signals present in the combined data:</p>
+        <div class="equation">
+            <div>
+                $$\theta^{*} = \arg\min_{\theta}
+                \sum_{(u,i)\in\mathcal{E}_{comb}}\mathcal{L}(f_{\theta}(u,i|\mathcal{G}_{comb}),y_{u,i})$$
+            </div>
+            <div class="equation-number">(4)</div>
+        </div>
+        <p>where $f_{\theta}$ is the LightGCN scoring function with parameters $\theta$, and $y_{u,i}$ indicates an
+            observed interaction. After this phase, the learned parameters $\theta^{*}$ are frozen, denoted as
+            $\bar{\theta}$, to serve as a robust, generalized backbone for adaptation.</p>
+
+        <h3>Target Market Adaptation Phase</h3>
+        <p>In this phase, we adapt a pre-trained Graph Neural Network (GNN) to a specific target market $M_{T}$. The
+            GNN, with parameters $\bar{\theta}$ frozen after training on the combined graph $\mathcal{G}_{comb}$ of
+            multiple markets, serves as a robust backbone capturing generalized user-item interaction patterns. For
+            adaptation, we first isolate the subgraph corresponding to the target market,
+            $\mathcal{G}_{T}=(\mathcal{U}_{T},\mathcal{I}_{T},\mathcal{E}_{T})$, from the global graph
+            $\mathcal{G}_{comb}$. We then introduce learnable prompts, lightweight parameter vectors, added to the node
+            feature matrix of $\mathcal{G}_{T}$. These prompts modify the input to the GNN, creating a student model
+            tailored to the target market. Importantly, only the prompt parameters are tuned during adaptation, keeping
+            the backbone parameters $\bar{\theta}$ frozen. This parameter-efficient approach mitigates the objective gap
+            and reduces the risk of negative transfer, which can occur in traditional fine-tuning due to distribution
+            mismatches.</p>
+
+        <p><strong>Graph Prompt Injection</strong> Specifically, for the target market graph
+            $\mathcal{G}_{T}=(A_{T},X_{T})$, we inject prompts by modifying the node feature matrix to
+            $X'_{T}=X_{T}+\psi$, where $\psi$ is a matrix of learnable prompt vectors. This approach is grounded in
+            prior work (Fang et al. 2024), which demonstrates that such feature-based prompts can effectively
+            approximate structural changes in the graph (i.e., $f(A_{T},X_{T}+\psi)\approx f(A'_{T},X_{T})$).
+            Consequently, prompt-tuning enables the frozen GNN to emulate a structure adapted to $\mathcal{M}_{T}$,
+            without requiring costly retraining.</p>
+
+        <p><strong>Attention-Based Prompt Design</strong> To efficiently generate node-specific prompts, we employ an
+            attention-based mechanism. We maintain a small set of $M$ learnable basis prompts
+            $\mathcal{P}^{B}=\{p_{1}^{B},...,p_{M}^{B}\}$, each in $\mathbb{R}^{D}$, where $D$ is the feature dimension.
+            For each node $n$, the prompt $\psi_{n}\in\mathbb{R}^{D}$ is computed as a weighted sum of these bases:</p>
+        <div class="equation">
+            <div>
+                $$\psi_{n} = \sum_{k=1}^{M}\alpha_{n,k}p_{k}^{B} \quad \text{where} \quad \alpha_{n,k} =
+                \frac{\exp(a_{k}^{\top}e_{n})}{\sum_{l=1}^{M}\exp(a_{l}^{\top}e_{n})}$$
+            </div>
+        </div>
+        <p>with learnable attention vectors $a_{k}\in\mathbb{R}^{D}$ and the node's input feature vector
+            $e_{n}=X_{T}[n]$. This design ensures scalability and computational efficiency.</p>
+
+        <p>However, optimizing these prompts using only the sparse interaction data from $M_{T}$ via a standard Bayesian
+            Personalized Ranking (BPR) loss often results in weak and noisy supervision, limiting their effectiveness in
+            capturing target-specific preferences. To address this, we introduce a knowledge distillation approach that
+            leverages a target-market-specific teacher model to provide rich, market-aware supervisory signals, guiding
+            the prompt learning process. We detail this approach in the following subsection.</p>
+
+        <h3>Prompt-Tuning with Distillation Learning</h3>
+        <p>Our distillation approach addresses sparse supervision in target markets through dual knowledge transfer from
+            a market-specific teacher ($\mathcal{T}$) to a prompt-augmented student ($\mathcal{S}$). The teacher model
+            $\mathcal{T}=f_{\theta_{T}}(\mathcal{G}_{T})$ is trained end-to-end on $M_{T}$, while the student combines
+            frozen backbone parameters from $\mathcal{G}_{comb}$ with learnable prompts through
+            $\mathcal{S}=f_{\bar{\theta}}(\psi(\mathcal{G}_{T}))$. The objective is to train the prompts of the student
+            model so that its output closely mimics that of the teacher model. We implement this through two novel
+            distillation strategies:</p>
+
+        <p><strong>Weighted Ranking Distillation (WRD)</strong> To address the unique challenges of ranking tasks, WRD
+            employs tailored weight mechanisms designed to reduce distributional bias between source and target markets.
+            We select the top $K$ items ranked by the teacher model as reference points to guide the student model's
+            learning. The WRD loss is formulated as:</p>
+        <div class="equation">
+            <div>
+                $$\mathcal{L}_{WRD} = -\sum_{r=1}^{K}w_{r}\cdot \log(\sigma(\hat{y}_{i_{r}}))$$
+            </div>
+            <div class="equation-number">(5)</div>
+        </div>
+        <p>where $\hat{y}_{i_{r}}$ represents the student model's predicted score for the item $i_{r}$ given by:</p>
+        <div class="equation">
+            <div>
+                $$\hat{y}_{i_{r}} = f_{\bar{\theta}}(u,i_{r}|\psi(\mathcal{G}_{T}))$$
+            </div>
+            <div class="equation-number">(6)</div>
+        </div>
+        <p>In this setup, $i_{r}$ denotes the $r$-th ranked item according to the teacher model, and $w_{r}$ is a
+            composite weight consisting of two parts: the rank position weight and the rank deviation weight.</p>
+
+        <ul>
+            <li><strong>Rank Position Weight:</strong> The rank position weight $w_{r}^{pos}$ is designed based on the
+                assumption that items ranked higher by the teacher model are more important for recommendation quality
+                in the target market. To reflect this, we use a softmax function to compute the weights:
+                <div class="equation">
+                    <div>$$w_{r}^{pos} = \frac{\exp(-r/\lambda)}{\sum_{k=1}^{K}\exp(-k/\lambda)}$$</div>
+                    <div class="equation-number">(7)</div>
+                </div>
+                where $r$ is the rank of item $i_{r}$ in the teacher's predictions, and $\lambda$ is a temperature
+                parameter that controls the weight distribution.
+            </li>
+            <li><strong>Rank Deviation Weight:</strong> The rank deviation weight $w_{r}^{dev}$ is introduced to account
+                for the discrepancy between the teacher's and student's rankings for each item. Specifically, if the
+                student model's predicted rank $\hat{r}_{i_{r}}$ for item $i_{r}$ differs significantly from the
+                teacher's rank $r$, a higher weight is assigned to emphasize the correction of this discrepancy. The
+                rank deviation weight is defined as:
+                <div class="equation">
+                    <div>$$w_{r}^{dev} = \sigma(\mu\cdot(\hat{r}_{i_{r}}-r))$$</div>
+                    <div class="equation-number">(8)</div>
+                </div>
+                where $\sigma$ is the sigmoid function, $\hat{r}_{i_{r}}$ is the student's predicted rank for $i_{r}$
+                and $\mu$ is a hyperparameter that adjusts the sensitivity of the weight to ranking differences.
+            </li>
+        </ul>
+
+        <p>The final weight $w_{r}$ for each item $i_{r}$ is obtained by combining the rank position weight and the rank
+            deviation weight. Specifically, it is calculated as:</p>
+        <div class="equation">
+            <div>
+                $$w_{r} = \frac{w_{r}^{pos}\cdot w_{r}^{dev}}{\sum_{j=1}^{K}w_{j}^{pos}\cdot w_{j}^{dev}}$$
+            </div>
+            <div class="equation-number">(9)</div>
+        </div>
+
+        <p><strong>Adaptive Market-aware Ranking Decoupled Distillation (AMRDD)</strong> In CMR tasks, different source
+            markets may provide varying levels of useful signals, with some introducing noise. Moreover, target markets
+            often suffer from data sparsity, which limits the ability to learn robust behavioral patterns and model
+            reliable user preferences. To address these issues, we introduce AMRDD which leverages both positive and
+            negative samples to enrich the training data by extracting implicit preferences from unobserved items.
+            Additionally, AMRDD decouples user preferences into global and fine-grained components, allowing for more
+            nuanced modeling. A key feature of AMRDD is its dynamic adjustment of the influence of each source market,
+            ensuring that more relevant markets contribute more significantly to the distillation process.</p>
+
+        <p><strong>Decoupling Ranking Preferences</strong> We design the AMRDD loss into the disentangled parts to help
+            the student model align with target-specific teacher. For each user $u$ in a given market, we construct a
+            ranked list of items $i=[i_{1}^{+},i_{2}^{-},...,i_{K}^{-}]$. This list contains one positive item
+            $i_{1}^{+}$ with which the user has interacted, and $K-1$ negative items $\{i_{k}^{-}\}_{k=2}^{K}$ sampled
+            randomly from items the user has not interacted with. Both the teacher and student models are scoring
+            functions, $s^{\mathcal{T}}(u,i)$ and $s^{\mathcal{S}}(u,i)$, that produce a logit (a raw prediction score)
+            for a given user-item pair. For the constructed item list $i$, the models generate logit vectors, denoted as
+            $y^{\mathcal{T}}$ and $y^{\mathcal{S}}$ respectively, where $y=[y_{1}^{+},y_{2}^{-},...,y_{K}^{-}]$. The
+            core of AMRDD is a distillation loss that aligns the student's predicted ranking distribution with the
+            teacher's. We decouple this alignment into two distinct components.</p>
+
+        <p>a) <strong>Global Preference Alignment.</strong> First, we capture the coarse-grained user preference for
+            observed items over unobserved ones. To achieve this, we define a global preference distribution
+            $d=[d^{+},d^{-}]\in\mathbb{R}^{2}$. This distribution represents the aggregated probability mass of the
+            positive item versus all negative items. The components are calculated via a softmax over the logits in $y$:
+        </p>
+        <div class="equation">
+            <div>
+                $$d^{+} = \frac{\exp(y_{1}^{+})}{\sum_{k=1}^{K}\exp(y_{k})}, \quad d^{-} =
+                \frac{\sum_{k=2}^{K}\exp(y_{k}^{-})}{\sum_{k=1}^{K}\exp(y_{k})}$$
+            </div>
+            <div class="equation-number">(10)</div>
+        </div>
+        <p>The global alignment loss $\mathcal{L}_{global}$ then minimizes the KL divergence between the teacher's
+            global preference $d^{\mathcal{T}}$ and the student's $d^{\mathcal{S}}$:</p>
+        <div class="equation">
+            <div>
+                $$KL(d^{\mathcal{T}}||d^{\mathcal{S}}) =
+                d^{+\mathcal{T}}\log\left(\frac{d^{+\mathcal{T}}}{d^{+\mathcal{S}}}\right) +
+                d^{-\mathcal{T}}\log\left(\frac{d^{-\mathcal{T}}}{d^{-\mathcal{S}}}\right)$$
+            </div>
+            <div class="equation-number">(11)</div>
+        </div>
+
+        <p>b) <strong>Fine-grained Preference Alignment.</strong> Second, we distill the nuanced ranking preferences
+            among the unobserved items. An absence of interaction does not always mean dislike, and the teacher model
+            may have learned valuable implicit preferences. We define a fine-grained preference distribution
+            $z=[z_{2},z_{3},...,z_{K}]\in\mathbb{R}^{K-1}$ by applying a softmax over the logits of only the negative
+            items:</p>
+        <div class="equation">
+            <div>
+                $$z_{k} = \frac{\exp(y_{k}^{-})}{\sum_{j=2}^{K}\exp(y_{j}^{-})}, \quad k=2,...,K$$
+            </div>
+            <div class="equation-number">(12)</div>
+        </div>
+        <p>The fine-grained alignment loss $\mathcal{L}_{fine}$ transfers the teacher's ranking knowledge
+            $z^{\mathcal{T}}$ to the student $z^{\mathcal{S}}$:</p>
+        <div class="equation">
+            <div>
+                $$KL(z^{\mathcal{T}}||z^{\mathcal{S}}) =
+                \sum_{k=2}^{K}z_{k}^{\mathcal{T}}\log\left(\frac{z_{k}^{\mathcal{T}}}{z_{k}^{\mathcal{S}}}\right)$$
+            </div>
+            <div class="equation-number">(13)</div>
+        </div>
+
+        <p><strong>The Final AMRDD Objective</strong> We combine the global and fine-grained losses to form the full
+            distillation objective. To dynamically control the contribution of each source market, we introduce an
+            adaptive weight $\alpha_{m}$. This weight is calculated based on the similarity between the student's global
+            preference for market $m$ $(d_{m}^{+\mathcal{S}})$ and the teacher's global preference $(d^{+\mathcal{T}})$.
+            Source markets that are more similar to the target are assigned higher weights:</p>
+        <div class="equation">
+            <div>
+                $$\alpha_{m} =
+                \frac{\exp(-|d_{m}^{+\mathcal{S}}-d^{+\mathcal{T}}|)}{\sum_{k\in\mathcal{M}_{s}}\exp(-|d_{k}^{+\mathcal{S}}-d^{+\mathcal{T}}|)}$$
+            </div>
+            <div class="equation-number">(14)</div>
+        </div>
+        <p>The final AMRDD objective is the weighted sum of losses across all source markets, which we aim to minimize:
+        </p>
+        <div class="equation">
+            <div>
+                $$\mathcal{L}_{AMRDD} =
+                \sum_{m\in\mathcal{M}_{s}}\alpha_{m}\left[KL(d^{\mathcal{T}}||d_{m}^{\mathcal{S}}) +
+                d^{-\mathcal{T}}KL(z^{\mathcal{T}}||z_{m}^{\mathcal{S}})\right]$$
+            </div>
+            <div class="equation-number">(15)</div>
+        </div>
+        <p>Here, $d_{m}^{\mathcal{S}}$ and $z_{m}^{\mathcal{S}}$ are the preference distributions computed by the
+            student model using a batch of data from source market $m$. Also, the fine-grained loss is weighted by
+            $d^{-\mathcal{T}}$, the teacher's confidence in the unobserved set. This ensures we only focus on
+            fine-grained ranking when the teacher model indicates a substantial preference signal exists among the
+            negative items.</p>
+
+        <h3>Overall Loss Function</h3>
+        <p>To optimize the prompt learning in the adaptation phase, the final loss function integrates three components:
+            BPR loss, WRD loss, and AMRDD loss, defined as follows:</p>
+        <div class="equation">
+            <div>
+                $$\mathcal{L}_{Total} = \alpha\mathcal{L}_{BPR} + \beta\mathcal{L}_{WRD} + \gamma\mathcal{L}_{AMRDD}$$
+            </div>
+            <div class="equation-number">(16)</div>
+        </div>
+        <p>where $\alpha$, $\beta$, and $\gamma$ are hyperparameters used to balance the contributions of three losses.
+        </p>
+
+
+        <h2>Experiment</h2>
+        <p>Our experimental evaluation aims to answer six questions:</p>
+        <ul>
+            <li><strong>RQ1 (Effectiveness):</strong> Does our method outperform competitive single-market, CDR, and CMR
+                baselines?</li>
+            <li><strong>RQ2 (Robustness):</strong> Can our model generalize well across markets with varying data
+                densities (data-scarce)?</li>
+            <li><strong>RQ3 (Ablation):</strong> What are the individual contributions of our approach's components:
+                multi-market pre-training, graph prompts, and knowledge distillation?</li>
+            <li><strong>RQ4 (Sensitivity):</strong> How does model performance vary with respect to key hyperparameters?
+            </li>
+            <li><strong>RQ5 (Efficiency):</strong> How efficient is our method compared to other CMR methods?</li>
+            <li><strong>RQ6 (Embedding):</strong> How does distillation learning affect the learned feature embeddings?
+            </li>
+        </ul>
+
+        <h3>Experiment Setup</h3>
+        <p><strong>Dataset</strong> Following previous work (Bonab et al. 2021; Hu et al. 2024; Wang et al. 2024), we
+            conduct experiments on the XMarket dataset, which contains user-item interaction data from multiple
+            countries. We focus on the electronics category to capture diverse cultures, user preferences, and market
+            sizes. The data is split into training, validation, and test sets using an 80/10/10 ratio.</p>
+
+        <p><strong>Baselines</strong> To comprehensively validate the proposed method, we compare it with mainstream
+            recommendation models, including methods for single-market, cross-domain (CDR), and cross-market (CMR)
+            recommendation.</p>
+        <ul>
+            <li><strong>Single-Market Recommendation:</strong> LightGCN (He et al. 2020) and NMF (He et al. 2017).</li>
+            <li><strong>Cross-Domain Recommendation:</strong> DTCDR (Zhu et al. 2019), NATR (Gao et al. 2019) and DCCDR
+                (Zhang et al. 2023).</li>
+            <li><strong>Cross-Market Recommendation:</strong> MAML (Finn, Abbeel, and Levine 2017), FOREC (Bonab et al.
+                2021), Bert4XMR (Hu et al. 2024), and CAT-SR (Wang et al. 2024).</li>
+        </ul>
+
+        <p><strong>Hyper-parameters and Environment</strong> In the experiments, we tune and optimize several
+            hyperparameters across the models to ensure fair comparison. The Adam optimizer is used with learning rates
+            selected from $\{10^{-1}, 10^{-2}, 5\times10^{-3}, 10^{-4}\}$, with $10^{-3}$ for model training and
+            $10^{-4}$ for prompt tuning. Embedding dimensions are set to 64, with three GCN layers for message passing.
+            Each batch samples 50 user-item pairs (batch size = 16), and $L_{2}$ regularization $(1\times10^{-6})$ with
+            early stopping (patience = 10) is applied to prevent overfitting. All experiments are run with fixed random
+            seeds for reproducibility.</p>
+
+        <h3>Experimental Results and Discussion</h3>
+
+        <p><strong>Recommendation Performance Evaluations (RQ1)</strong> Table 1 demonstrates that our proposed DCMPT
+            consistently and significantly outperforms all baselines across seven diverse markets on NDCG@10 and
+            Recall@10 metrics. While specialized cross-market models (e.g., FOREC, CAT-SR) expectedly surpass
+            single-market and cross-domain methods, DCMPT establishes a new state-of-the-art by a considerable margin.
+            These results validate that the proposed distilled prompt-tuning paradigm effectively transfers generalized
+            knowledge while enabling precise, parameter-efficient adaptation. DCMPT successfully aligns the model with
+            unique market characteristics, proving its superiority for real-world cross-market recommendation.</p>
+
+        <table>
+            <caption>Table 1: Performance comparisons.</caption>
+            <thead>
+                <tr>
+                    <th rowspan="2">Type</th>
+                    <th rowspan="2">Method</th>
+                    <th colspan="7">NDCG@10</th>
+                    <th colspan="7">Recall@10</th>
+                </tr>
+                <tr>
+                    <th>de</th>
+                    <th>jp</th>
+                    <th>in</th>
+                    <th>fr</th>
+                    <th>ca</th>
+                    <th>mx</th>
+                    <th>uk</th>
+                    <th>de</th>
+                    <th>jp</th>
+                    <th>in</th>
+                    <th>fr</th>
+                    <th>ca</th>
+                    <th>mx</th>
+                    <th>uk</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td rowspan="2">Single</td>
+                    <td>LightGCN</td>
+                    <td>0.1389</td>
+                    <td>0.1450</td>
+                    <td>0.1583</td>
+                    <td>0.0971</td>
+                    <td>0.0280</td>
+                    <td>0.0915</td>
+                    <td>0.1331</td>
+                    <td>0.1958</td>
+                    <td>0.2258</td>
+                    <td>0.2394</td>
+                    <td>0.1730</td>
+                    <td>0.0560</td>
+                    <td>0.1575</td>
+                    <td>0.2091</td>
+                </tr>
+                <tr>
+                    <td>NMF</td>
+                    <td>0.1010</td>
+                    <td>0.1801</td>
+                    <td>0.1768</td>
+                    <td>0.1093</td>
+                    <td>0.0858</td>
+                    <td>0.0539</td>
+                    <td>0.1691</td>
+                    <td>0.1684</td>
+                    <td>0.2453</td>
+                    <td>0.2533</td>
+                    <td>0.1445</td>
+                    <td>0.1567</td>
+                    <td>0.1175</td>
+                    <td>0.2579</td>
+                </tr>
+                <tr>
+                    <td rowspan="3">CDR</td>
+                    <td>DTCDR</td>
+                    <td>0.1620</td>
+                    <td>0.1827</td>
+                    <td>0.2391</td>
+                    <td>0.1829</td>
+                    <td>0.1201</td>
+                    <td>0.1328</td>
+                    <td>0.2309</td>
+                    <td>0.2287</td>
+                    <td>0.2534</td>
+                    <td>0.2784</td>
+                    <td>0.2256</td>
+                    <td>0.1830</td>
+                    <td>0.1969</td>
+                    <td>0.2841</td>
+                </tr>
+                <tr>
+                    <td>NATR</td>
+                    <td>0.1587</td>
+                    <td>0.2138</td>
+                    <td>0.2264</td>
+                    <td>0.1653</td>
+                    <td>0.1055</td>
+                    <td>0.1243</td>
+                    <td>0.2190</td>
+                    <td>0.2139</td>
+                    <td>0.2803</td>
+                    <td>0.2721</td>
+                    <td>0.2075</td>
+                    <td>0.1732</td>
+                    <td>0.1930</td>
+                    <td>0.2751</td>
+                </tr>
+                <tr>
+                    <td>DCCDR</td>
+                    <td>0.1651</td>
+                    <td>0.2225</td>
+                    <td>0.2043</td>
+                    <td>0.1882</td>
+                    <td>0.1164</td>
+                    <td>0.1379</td>
+                    <td>0.2181</td>
+                    <td>0.2348</td>
+                    <td>0.2867</td>
+                    <td>0.2436</td>
+                    <td>0.2312</td>
+                    <td>0.1795</td>
+                    <td>0.2041</td>
+                    <td>0.2625</td>
+                </tr>
+                <tr>
+                    <td rowspan="5">CMR</td>
+                    <td>MAML</td>
+                    <td>0.2588</td>
+                    <td>0.3826</td>
+                    <td>0.5667</td>
+                    <td>0.3739</td>
+                    <td>0.1591</td>
+                    <td>0.2786</td>
+                    <td>0.4530</td>
+                    <td>0.3353</td>
+                    <td>0.4616</td>
+                    <td>0.6478</td>
+                    <td>0.5157</td>
+                    <td>0.2090</td>
+                    <td>0.4412</td>
+                    <td>0.6169</td>
+                </tr>
+                <tr>
+                    <td>FOREC</td>
+                    <td>0.3341</td>
+                    <td>0.4243</td>
+                    <td>0.5713</td>
+                    <td>0.4534</td>
+                    <td>0.2188</td>
+                    <td>0.3358</td>
+                    <td>0.4465</td>
+                    <td>0.4470</td>
+                    <td>0.4927</td>
+                    <td>0.6386</td>
+                    <td>0.5684</td>
+                    <td>0.3466</td>
+                    <td>0.4668</td>
+                    <td>0.6048</td>
+                </tr>
+                <tr>
+                    <td>Bert4XMR</td>
+                    <td>0.3345</td>
+                    <td>0.4064</td>
+                    <td>0.5630</td>
+                    <td>0.2511</td>
+                    <td>0.1969</td>
+                    <td>0.1868</td>
+                    <td>0.3499</td>
+                    <td>0.3864</td>
+                    <td>0.4689</td>
+                    <td>0.6589</td>
+                    <td>0.3458</td>
+                    <td>0.3167</td>
+                    <td>0.3084</td>
+                    <td>0.4164</td>
+                </tr>
+                <tr>
+                    <td>CAT-SR</td>
+                    <td>0.3134</td>
+                    <td>0.4931</td>
+                    <td>0.5673</td>
+                    <td>0.4959</td>
+                    <td>0.2258</td>
+                    <td>0.3798</td>
+                    <td>0.4768</td>
+                    <td>0.4019</td>
+                    <td>0.5546</td>
+                    <td>0.6681</td>
+                    <td>0.5917</td>
+                    <td>0.3779</td>
+                    <td>0.5321</td>
+                    <td>0.6238</td>
+                </tr>
+                <tr>
+                    <td><strong>DCMPT</strong></td>
+                    <td><strong>0.3898</strong></td>
+                    <td><strong>0.5658</strong></td>
+                    <td><strong>0.5850</strong></td>
+                    <td><strong>0.5158</strong></td>
+                    <td><strong>0.2640</strong></td>
+                    <td><strong>0.4190</strong></td>
+                    <td><strong>0.5024</strong></td>
+                    <td><strong>0.5365</strong></td>
+                    <td><strong>0.6279</strong></td>
+                    <td><strong>0.6751</strong></td>
+                    <td><strong>0.6176</strong></td>
+                    <td><strong>0.4057</strong></td>
+                    <td><strong>0.5702</strong></td>
+                    <td><strong>0.6739</strong></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="figure-placeholder">
+            [Görsel: Seyrek ve yoğun pazarlarda performans karşılaştırması]
+        </div>
+        <div class="caption">Figure 3: Performance comparison across sparse and rich markets.</div>
+
+        <p><strong>Robustness under Data-Sparse and Rich Markets (RQ2)</strong> To investigate the robustness across
+            varying data densities, we partition the target markets into data-scarce markets (ca, uk, jp) and data-rich
+            markets (fr, mx, in) based on interaction statistics. As shown in Fig. 3:</p>
+        <ul>
+            <li><strong>Data-sparse markets:</strong> DCMPT consistently outperforms all baselines in sparse markets and
+                exhibits more stable performance under low-resource conditions. In contrast, baseline methods such as
+                CAT-SR and Bert4XMR show noticeable performance instability across sparse markets, indicating limited
+                robustness in low-resource scenarios.</li>
+            <li><strong>Data-rich markets:</strong> DCMPT also achieves the best performance across three data-rich
+                markets. For instance, it outperforms the strongest baseline by +7.2% Recall@10 on the mx market. These
+                results show that DCMPT scales well in data-rich settings while maintaining strong generalization.</li>
+        </ul>
+
+        <div class="figure-placeholder">
+            [Görsel: Farklı öğe gruplarında soğuk başlangıç performansı]
+        </div>
+        <div class="caption">Figure 4: Cold-start performance over different item groups.</div>
+
+        <p><strong>Data Sparsity Analysis (RQ2)</strong> To further evaluate the robustness of DCMPT under data sparsity
+            compared to other models, we partition items into different groups based on their number of positive
+            interactions in the training set. As shown in Fig. 4, DCMPT consistently achieves superior performance
+            across all item groups on both the mx and fr markets. This demonstrates the effectiveness of our method in
+            alleviating data sparsity, especially for cold-start scenarios. In contrast, traditional fine-tuning-based
+            methods show a more substantial drop in performance on sparse items, indicating limited transfer capability
+            under extreme sparsity.</p>
+
+        <p><strong>Ablation Study (RQ3)</strong> We conduct an ablation study with three components: (1) DCMPT w/o
+            Pretrain, which removes multi-market pre-training; (2) DCMPT w/o Prompt, which removes the prompt tuning
+            mechanism; and (3) DCMPT w/o Distillation, which removes the distillation losses. As shown in Table 2, model
+            performance collapses without pretraining, highlighting its foundational role. Removing the prompts also
+            causes a sharp decline, demonstrating their critical role in target-specific adaptation. The performance
+            drop from removing distillation is more subtle but consistent, indicating its importance for refining and
+            guiding the prompts effectively. Furthermore, both WRD and AMRDD strategies are crucial for optimal
+            performance, underscoring the necessity of all components in DCMPT.</p>
+
+        <table>
+            <caption>Table 2: Ablation study on NDCG@10.</caption>
+            <thead>
+                <tr>
+                    <th>Variant</th>
+                    <th>de</th>
+                    <th>jp</th>
+                    <th>in</th>
+                    <th>fr</th>
+                    <th>ca</th>
+                    <th>mx</th>
+                    <th>uk</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>DCMPT</strong></td>
+                    <td>0.390</td>
+                    <td>0.566</td>
+                    <td>0.585</td>
+                    <td>0.516</td>
+                    <td>0.264</td>
+                    <td>0.419</td>
+                    <td>0.502</td>
+                </tr>
+                <tr>
+                    <td>w/o pretrain</td>
+                    <td>0.139</td>
+                    <td>0.165</td>
+                    <td>0.178</td>
+                    <td>0.107</td>
+                    <td>0.028</td>
+                    <td>0.092</td>
+                    <td>0.133</td>
+                </tr>
+                <tr>
+                    <td>w/o prompt</td>
+                    <td>0.252</td>
+                    <td>0.214</td>
+                    <td>0.378</td>
+                    <td>0.207</td>
+                    <td>0.123</td>
+                    <td>0.293</td>
+                    <td>0.320</td>
+                </tr>
+                <tr>
+                    <td>w/o distillation</td>
+                    <td>0.336</td>
+                    <td>0.440</td>
+                    <td>0.498</td>
+                    <td>0.435</td>
+                    <td>0.186</td>
+                    <td>0.310</td>
+                    <td>0.392</td>
+                </tr>
+                <tr>
+                    <td>w/o WRD</td>
+                    <td>0.345</td>
+                    <td>0.468</td>
+                    <td>0.521</td>
+                    <td>0.458</td>
+                    <td>0.211</td>
+                    <td>0.340</td>
+                    <td>0.430</td>
+                </tr>
+                <tr>
+                    <td>w/o AMRDD</td>
+                    <td>0.353</td>
+                    <td>0.487</td>
+                    <td>0.530</td>
+                    <td>0.464</td>
+                    <td>0.218</td>
+                    <td>0.345</td>
+                    <td>0.421</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="figure-placeholder">
+            [Görsel: Parametre Duyarlılık Analizi]
+        </div>
+        <div class="caption">Figure 5: Parameter Sensitivity Analysis.</div>
+
+        <p><strong>Parameter Analysis (RQ4)</strong> Fig. 5 reveals two critical insights on mx/ca markets.</p>
+        <ul>
+            <li>$P_{num}$: The optimal prompt count reveals a trade-off between model capacity and data density.
+                Data-rich markets like 'mx' require fewer prompts, while sparse markets like 'ca' leverage a higher
+                capacity ($P_{num}=20$). Performance degrades when exceeding these values, emphasizing the need for
+                adaptive prompt sizing.</li>
+            <li>$\alpha$: With $\beta$ and $\gamma$ held constant, we examined the impact of varying $\alpha$ on model
+                performance. Volatile markets (mx) prefer balanced task/distillation focus ($\alpha=0.5$, +9.1% vs
+                $\alpha=0.1$), while stable markets (ca) need distillation dominance ($\alpha=0.9$).</li>
+        </ul>
+
+        <p><strong>Training Efficiency (RQ5)</strong> To evaluate the training efficiency, we compare our
+            prompt-tuning-based DCMPT with CMR methods under the pretraining and finetuning(PF) paradigm on the uk
+            market. Table 3 shows that, models under the PF paradigm require substantially more trainable parameters and
+            longer training time due to full backbone optimization. In contrast, DCMPT significantly reduces parameter
+            overhead while achieving superior recommendation performance, demonstrating the efficiency and effectiveness
+            of lightweight prompt tuning in cross-market adaptation.</p>
+
+        <table>
+            <caption>Table 3: Comparison of training efficiency across PF and PP paradigms (on the uk market).</caption>
+            <thead>
+                <tr>
+                    <th>Paradigm</th>
+                    <th>Method</th>
+                    <th>Params</th>
+                    <th>Time/Epoch</th>
+                    <th>Training Time</th>
+                    <th>Recall@10</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td rowspan="3">Finetuning</td>
+                    <td>FOREC</td>
+                    <td>22M</td>
+                    <td>21.0s</td>
+                    <td>25 min</td>
+                    <td>0.6048</td>
+                </tr>
+                <tr>
+                    <td>Bert4XMR</td>
+                    <td>47M</td>
+                    <td>173.1s</td>
+                    <td>62 min</td>
+                    <td>0.4164</td>
+                </tr>
+                <tr>
+                    <td>CAT-SR</td>
+                    <td>34M</td>
+                    <td>42.2s</td>
+                    <td>37 min</td>
+                    <td>0.6238</td>
+                </tr>
+                <tr>
+                    <td>Prompt-tuning</td>
+                    <td><strong>DCMPT</strong></td>
+                    <td><strong>46K</strong></td>
+                    <td><strong>8.6s</strong></td>
+                    <td><strong>9 min</strong></td>
+                    <td><strong>0.6739</strong></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="figure-placeholder">
+            [Görsel: İstem damıtma öncesi ve sonrası t-SNE özellik görselleştirmesi]
+        </div>
+        <div class="caption">Figure 6: t-SNE feature visualization before and after prompt distillation.</div>
+
+        <p><strong>Impact of Distillation on Feature Embeddings (RQ6)</strong> Fig 6 shows the t-SNE visualization of
+            the target feature embeddings before and after prompt distillation learning. Each color denotes a different
+            market. Before distillation, the embeddings are entangled with unclear boundaries across markets, indicating
+            insufficient market-specific adaptation. After distillation, the representations exhibit more compact
+            intra-market clustering and clearer inter-market separation. This result suggests that our distillation
+            strategies effectively guides the prompts to capture market-specific information.</p>
+
+        <h2>Conclusion</h2>
+        <p>This paper presents a novel cross-market recommendation method, DCMPT, which combines prompt tuning and
+            distillation learning with graph neural networks to address the issue of negative transfer in CMR.
+            Leveraging the prompt-tuning from NLP, our approach effectively captures market-specific preferences in the
+            target market and reduces the need for extensive fine-tuning typically required in traditional CMR tasks. To
+            further improve the model's adaptability, we introduce two distillation learning strategies. Extensive
+            experiments demonstrate that DCMPT significantly outperforms existing baseline methods on key metrics such
+            as NDCG and Recall. Future work may extend our approach to multilingual or multimodal CMR scenarios.</p>
+
+        <h2>Acknowledgements</h2>
+        <p>This research was supported in part by the National Natural Science Foundation of China (Grant No. 72401232),
+            the Natural Science Foundation of the Jiangsu Higher Educational Institution of China (Grant No.
+            23KJB520037), and the XJTLU Research Development Fund under RDF-21-01-053.</p>
+
+        <h2>References</h2>
+        <div class="references">
+            <p>Bonab, H.; Aliannejadi, M.; Vardasbi, A.; Kanoulas, E.; and Allan, J. 2021. Cross-market product
+                recommendation. In Proceedings of the 30th ACM International Conference on Information & Knowledge
+                Management, 110-119.</p>
+            <p>Chen, Y.; Yao, Y.; Chan, W. K. V.; Xiao, L.; Zhang, K.; Zhang, L.; and Ye, Y. 2023. CDR-Adapter: Learning
+                Adapters to Dig Out More Transferring Ability for Cross-Domain Recommendation Models. arXiv preprint
+                arXiv:2311.02398.</p>
+            <p>Cui, X.; Lu, W.; Tong, Y.; Li, Y.; and Zhao, Z. 2025. Diffusion-based multi-modal synergy interest
+                network for click-through rate prediction. In Proceedings of the 48th International ACM SIGIR Conference
+                on Research and Development in Information Retrieval, 581-591.</p>
+            <p>Du, M.; Zhao, Z.; Zhang, X.; Xu, Y.; Wang, X.; and Yang, Q. 2024. Towards Robust Cross-Domain
+                Recommendation with Joint Identifiability of User Preference. arXiv preprint arXiv:2411.17361.</p>
+            <p>Fang, T.; Zhang, Y.; Yang, Y.; Wang, C.; and Chen, L. 2024. Universal prompt tuning for graph neural
+                networks. Advances in Neural Information Processing Systems, 36.</p>
+            <p>Finn, C.; Abbeel, P.; and Levine, S. 2017. Model-Agnostic Meta-Learning for Fast Adaptation of Deep
+                Networks. In Proceedings of the 34th International Conference on Machine Learning, 1126-1135.</p>
+            <p>Gao, C.; Chen, X.; Feng, F.; Zhao, K.; He, X.; Li, Y.; and Jin, D. 2019. Cross-domain recommendation
+                without sharing user-relevant data. In The world wide web conference, 491-502.</p>
+            <p>Gao, J.; Wu, H.; Cheung, Y.-m.; Cao, J.; Yu, H.; and Zhang, Y. 2025. Mitigating Forgetting in Adapting
+                Pre-trained Language Models to Text Processing Tasks via Consistency Alignment. In Proceedings of the
+                ACM on Web Conference 2025. 3492-3504.</p>
+            <p>Gao, T.; Fisch, A.; and Chen, D. 2020. Making pre-trained language models better few-shot learners. arXiv
+                preprint arXiv:2012.15723.</p>
+            <p>Geng, S.; Liu, S.; Fu, Z.; Ge, Y.; and Zhang, Y. 2022. Recommendation as language processing (rlp): A
+                unified pre-train, personalized prompt & predict paradigm (p5). In Proceedings of the 16th ACM
+                Conference on Recommender Systems, 299-315.</p>
+            <p>Hao, B.; Yang, C.; Guo, L.; Yu, J.; and Yin, H. 2024. Motif-based prompt learning for universal
+                cross-domain recommendation. In Proceedings of the 17th ACM international conference on web search and
+                data mining, 257-265.</p>
+            <p>He, X.; Deng, K.; Wang, X.; Li, Y.; Zhang, Y.; and Wang, M. 2020. LightGCN: Simplifying and powering
+                graph convolution network for recommendation. In Proceedings of the 43rd International ACM SIGIR
+                conference on research and development in Information Retrieval, 639-648. ACM.</p>
+            <p>He, X.; Liao, L.; Zhang, H.; Nie, L.; Hu, X.; and Chua, T.-S. 2017. Neural collaborative filtering. In
+                Proceedings of the 26th International Conference on World Wide Web (WWW), 173-182. International World
+                Wide Web Conferences Steering Committee.</p>
+            <p>Hu, Z.; Nakagawa, S.; Cai, S.-M.; Ren, F.; and Deng, J. 2024. Enhancing cross-market recommendations by
+                addressing negative transfer and leveraging item co-occurrences. Information Systems, 124: 102388.</p>
+            <p>Li, X.; Sheng, J.; Cao, J.; Zhang, W.; Li, Q.; and Liu, T. 2024. Cdrnp: Cross-domain recommendation to
+                cold-start users via neural process. In Proceedings of the 17th ACM International Conference on Web
+                Search and Data Mining, 378-386.</p>
+            <p>Lin, Z.; Ding, H.; Hoang, N. T.; Kveton, B.; Deoras, A.; and Wang, H. 2024. Pre-trained recommender
+                systems: A causal debiasing perspective. In Proceedings of the 17th ACM International Conference on Web
+                Search and Data Mining. 424-433.</p>
+            <p>Lu, W.; and Yin, L. 2025. DMMD4SR: Diffusion Model-based Multi-level Multimodal Denoising for Sequential
+                Recommendation. In Proceedings of the 33rd ACM International Conference on Multimedia, 6363-6372.</p>
+            <p>Menglin, K.; Wang, J.; Pan, Y.; Zhang, H.; and Hou, M. 2024. C2DR: Robust Cross-Domain Recommendation
+                based on Causal Disentanglement. In Proceedings of the 17th ACM International Conference on Web Search
+                and Data Mining, 341-349.</p>
+            <p>Ozturk, S.; Ercan, A. B.; Tugay, R.; and Gunduz Oguducu, S. 2024. Enhancing Cross-Market Recommendation
+                System with Graph Isomorphism Networks: A Novel Approach to Personalized User Experience. In Proceedings
+                of the 2024 9th International Conference on Machine Learning Technologies, 251-257.</p>
+            <p>Peng, T.; Yuan, H.; Zhang, Y.; Li, Y.; Dai, P.; Wang, Q.; Wang, S.; and Wu, W. 2025. Tagrec:
+                Temporal-aware graph contrastive learning with theoretical augmentation for sequential recommendation.
+                IEEE Transactions on Knowledge and Data Engineering.</p>
+            <p>Tong, Y.; Lu, W.; Cui, X.; Mao, Y.; and Zhao, Z. 2025. DAPT: Domain-Aware Prompt-Tuning for Multimodal
+                Fake News Detection. In Proceedings of the 33rd ACM International Conference on Multimedia, 7902-7911.
+            </p>
+            <p>Wang, C.; Fan, Z.; Yang, L.; Yang, M.; Liu, X.; Liu, Z.; and Yu, P. 2024. Pre-Training with Transferable
+                Attention for Addressing Market Shifts in Cross-Market Sequential Recommendation. In Proceedings of the
+                30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD), to appear. Barcelona, Spain:
+                ACM.</p>
+            <p>Wang, H.; Wang, J.; Wang, J.; Zhao, M.; Zhang, W.; Zhang, F.; Xie, X.; and Guo, M. 2018. Graphgan: Graph
+                representation learning with generative adversarial nets. In Proceedings of the AAAI conference on
+                artificial intelligence, volume 32.</p>
+            <p>Wang, L.; Chen, S.; Jiang, L.; Pan, S.; Cai, R.; Yang, S.; and Yang, F. 2025. Parameter-efficient
+                fine-tuning in large language models: a survey of methodologies. Artificial Intelligence Review, 58(8):
+                227.</p>
+            <p>Wang, Z.; Dai, Z.; Póczos, B.; and Carbonell, J. 2019. Characterizing and avoiding negative transfer. In
+                Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, 11293-11302.</p>
+            <p>Yan, D.; Zhao, Y.; Yang, Z.; Jin, Y.; and Zhang, Y. 2022. FedCDR: Privacy-preserving federated
+                cross-domain recommendation. Digital Communications and Networks, 8(4): 552-560.</p>
+            <p>Yi, Z.; Ounis, I.; and Macdonald, C. 2023. Contrastive graph prompt-tuning for cross-domain
+                recommendation. ACM Transactions on Information Systems, 42(2): 1-28.</p>
+            <p>Zhang, H.; Shen, C.; Sun, X.; Tan, J.; Rong, Y.; Piao, C.; Cheng, H.; and Yi, L. 2024a. Adaptive
+                Coordinators and Prompts on Heterogeneous Graphs for Cross-Domain Recommendations. arXiv preprint
+                arXiv:2410.11719.</p>
+            <p>Zhang, P.; Yan, Y.; Zhang, X.; Kang, L.; Li, C.; Huang, F.; Wang, S.; and Kim, S. 2024b. Gpt4rec: Graph
+                prompt tuning for streaming recommendation. In Proceedings of the 47th International ACM SIGIR
+                Conference on Research and Development in Information Retrieval, 1774-1784.</p>
+            <p>Zhang, R.; Zang, T.; Zhu, Y.; Wang, C.; Wang, K.; and Yu, J. 2023. Disentangled contrastive learning for
+                cross-domain recommendation. In International Conference on Database Systems for Advanced Applications,
+                163-178. Springer.</p>
+            <p>Zhu, F.; Chen, C.; Wang, Y.; Liu, G.; and Zheng, X. 2019. Dtcdr: A framework for dual-target cross-domain
+                recommendation. In Proceedings of the 28th ACM international conference on information and knowledge
+                management, 1533-1542.</p>
+        </div>
+    </div>
+</body>
+
+</html>

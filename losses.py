@@ -175,66 +175,48 @@ def wrd_loss(student_scores: torch.Tensor,
 
 # =========================================================================
 # 3.  AMRDD LOSS  (Adaptive Market-aware Ranking Decoupled Distillation)
+#     Paper Equations 10–15
 # =========================================================================
-
-def _safe_kl_divergence(p_target: torch.Tensor, p_input: torch.Tensor,
-                        mask: torch.Tensor) -> torch.Tensor:
-    """
-    Compute per-user KL( p_target || p_input ) only over masked items.
-
-    This avoids the NaN that arises from  0 * log(0)  or  0 * (-inf)
-    when using masked_fill + F.kl_div on sparse positive sets.
-
-    Parameters
-    ----------
-    p_target : (batch, n_items)  – teacher softmax probabilities (masked items only)
-    p_input  : (batch, n_items)  – student softmax probabilities (masked items only)
-    mask     : (batch, n_items)  – bool, True for items in the active set
-
-    Returns
-    -------
-    kl_per_user : (batch,)
-    """
-    eps = 1e-10
-    # Only compute on masked positions → avoid 0·log(0) = NaN
-    # KL = Σ p_T · (log p_T - log p_S)   over masked items
-    log_p_t = (p_target + eps).log()
-    log_p_s = (p_input  + eps).log()
-    kl = p_target * (log_p_t - log_p_s)
-    # Zero-out contributions from items NOT in the set
-    kl = kl * mask.float()
-    return kl.sum(dim=-1)  # (batch,)
-
-
-def _masked_softmax(scores: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """
-    Softmax over items where mask is True, zero elsewhere.
-    Numerically stable: subtracts max before exp.
-    """
-    # Set masked-out items to -inf so they become 0 after softmax
-    scores = scores.masked_fill(~mask, float("-inf"))
-    return F.softmax(scores, dim=-1)
-
 
 def amrdd_loss(student_scores: torch.Tensor,
                teacher_scores: torch.Tensor,
                pos_mask: torch.Tensor,
+               K: int = 50,
                temperature: float = 1.0) -> torch.Tensor:
     """
     Adaptive Market-aware Ranking Decoupled Distillation loss.
 
-    Decouples items into observed/unobserved sets per user, then minimises
-    KL divergence between teacher and student softmax distributions in each
-    set.  The unobserved-set term is down-weighted when the teacher is
-    uncertain (high entropy → noisy signal).
+    **Paper-faithful implementation (Eq. 10–15).**
 
-        L_AMRDD = mean( KL_obs + w_neg · KL_unobs )
+    For each user u, we construct a ranked list of K items:
+        i = [i⁺₁, i⁻₂, …, i⁻_K]
+    containing 1 positive (observed) item and K−1 randomly sampled
+    negative (unobserved) items.
+
+    The loss decouples the alignment into two parts:
+
+    a) **Global Preference Alignment** (Eq. 10–11)
+       d = [d⁺, d⁻] is a 2-element distribution capturing the
+       aggregated probability of the positive vs all negatives.
+       We minimise KL(d_T ∥ d_S).
+
+    b) **Fine-grained Preference Alignment** (Eq. 12–13)
+       z = softmax over only the negative items' logits.
+       We minimise KL(z_T ∥ z_S).
+
+    The final objective (Eq. 15, simplified without per-market αm):
+       L = KL(d_T ∥ d_S) + d⁻_T · KL(z_T ∥ z_S)
+
+    The fine-grained loss is weighted by d⁻_T (teacher's confidence
+    in the unobserved set).  When the teacher is very confident about
+    the positive item (d⁺_T ≈ 1), the negative ranking matters less.
 
     Parameters
     ----------
-    student_scores : (batch, n_items)
-    teacher_scores : (batch, n_items)
-    pos_mask       : (batch, n_items) bool – True for observed items
+    student_scores : (batch, n_items)  – student logits for all items
+    teacher_scores : (batch, n_items)  – teacher logits (detached)
+    pos_mask       : (batch, n_items)  – bool, True for observed items
+    K              : int  – total items in sampled list (1 pos + K-1 neg)
     temperature    : float – softmax temperature
 
     Returns
@@ -242,51 +224,63 @@ def amrdd_loss(student_scores: torch.Tensor,
     loss : scalar Tensor
     """
     batch_size, n_items = student_scores.shape
-    neg_mask = ~pos_mask
-
-    # Scale by temperature
-    t_sc = teacher_scores / temperature
-    s_sc = student_scores / temperature
-
-    # --- Skip users with < 2 positive items (can't form a distribution) ---
-    n_pos = pos_mask.sum(dim=1)  # (batch,)
-    valid = n_pos >= 2           # users we can compute KL_obs for
-
-    if valid.sum() == 0:
-        # Edge case: no valid users at all → return 0 loss
-        return torch.tensor(0.0, device=student_scores.device, requires_grad=True)
-
-    # ------------------------------------------------------------------
-    # OBSERVED SET  KL(p_T^+ || p_S^+)
-    # ------------------------------------------------------------------
-    p_T_pos = _masked_softmax(t_sc, pos_mask)   # (batch, n_items)
-    p_S_pos = _masked_softmax(s_sc, pos_mask)
-    kl_obs  = _safe_kl_divergence(p_T_pos, p_S_pos, pos_mask)  # (batch,)
-
-    # ------------------------------------------------------------------
-    # UNOBSERVED SET  KL(p_T^- || p_S^-)
-    # ------------------------------------------------------------------
-    p_T_neg = _masked_softmax(t_sc, neg_mask)
-    p_S_neg = _masked_softmax(s_sc, neg_mask)
-    kl_unobs = _safe_kl_divergence(p_T_neg, p_S_neg, neg_mask)  # (batch,)
-
-    # ------------------------------------------------------------------
-    # TEACHER CONFIDENCE WEIGHT  (per user)
-    # ------------------------------------------------------------------
-    n_neg = neg_mask.sum(dim=1).float().clamp(min=2)
+    K = min(K, n_items)
+    device = student_scores.device
     eps = 1e-10
-    entropy = -(p_T_neg.clamp(min=eps) * p_T_neg.clamp(min=eps).log())
-    entropy = (entropy * neg_mask.float()).sum(dim=1)           # (batch,)
-    max_entropy = torch.log(n_neg)
-    confidence = (1.0 - entropy / max_entropy).clamp(min=0.0)  # (batch,)
 
-    # ------------------------------------------------------------------
-    # COMBINE per-user, then average over valid users
-    # ------------------------------------------------------------------
-    per_user = kl_obs + confidence * kl_unobs   # (batch,)
-    loss = per_user[valid].mean()
+    # Mask for users that have at least 1 positive item and K-1 negative items
+    valid_mask = (pos_mask.sum(dim=1) > 0) & ((~pos_mask).sum(dim=1) >= K - 1)
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=device, requires_grad=True)
 
-    return loss
+    # Filter to only valid users
+    valid_student_scores = student_scores[valid_mask]
+    valid_teacher_scores = teacher_scores[valid_mask]
+    valid_pos_mask = pos_mask[valid_mask]
+
+    # ---- Sample 1 positive item per user ----
+    pos_probs = valid_pos_mask.float()
+    pos_indices = torch.multinomial(pos_probs, num_samples=1)  # (N, 1)
+
+    # ---- Sample K-1 negative items per user ----
+    neg_probs = (~valid_pos_mask).float()
+    neg_indices = torch.multinomial(neg_probs, num_samples=K - 1, replacement=False)  # (N, K-1)
+
+    # ---- Construct item list: [pos, neg₁, neg₂, …, neg_{K-1}] ----
+    item_list = torch.cat([pos_indices, neg_indices], dim=1)  # (N, K)
+
+    # ---- Logit matrices for teacher and student (N, K) ----
+    y_T = valid_teacher_scores.gather(1, item_list) / temperature
+    y_S = valid_student_scores.gather(1, item_list) / temperature
+
+    # ==============================================================
+    # a) Global Preference Alignment  (Paper Eq. 10–11)
+    # ==============================================================
+    log_denom_T = torch.logsumexp(y_T, dim=1, keepdim=True)
+    d_pos_T = torch.exp(y_T[:, 0:1] - log_denom_T)
+    d_neg_T = torch.exp(torch.logsumexp(y_T[:, 1:], dim=1, keepdim=True) - log_denom_T)
+
+    log_denom_S = torch.logsumexp(y_S, dim=1, keepdim=True)
+    d_pos_S = torch.exp(y_S[:, 0:1] - log_denom_S)
+    d_neg_S = torch.exp(torch.logsumexp(y_S[:, 1:], dim=1, keepdim=True) - log_denom_S)
+
+    kl_global = (d_pos_T * torch.log((d_pos_T + eps) / (d_pos_S + eps)) +
+                 d_neg_T * torch.log((d_neg_T + eps) / (d_neg_S + eps))).squeeze(1)  # (N,)
+
+    # ==============================================================
+    # b) Fine-grained Preference Alignment  (Paper Eq. 12–13)
+    # ==============================================================
+    z_T = F.softmax(y_T[:, 1:], dim=1)  # (N, K-1)
+    z_S = F.softmax(y_S[:, 1:], dim=1)  # (N, K-1)
+
+    kl_fine = (z_T * torch.log((z_T + eps) / (z_S + eps))).sum(dim=1)  # (N,)
+
+    # ==============================================================
+    # Combined loss  (Paper Eq. 15, simplified)
+    # ==============================================================
+    user_loss = kl_global + d_neg_T.squeeze(1) * kl_fine
+
+    return user_loss.mean()
 
 
 # =========================================================================
