@@ -65,13 +65,13 @@ class LightGCN(nn.Module):
 
         # -----------------------------------------------------------------
         # Embedding tables (layer-0 embeddings).
-        # Xavier-uniform init keeps the initial scale reasonable so that
-        # the dot-product scores don't start extremely large or small.
+        # We use Normal(0, 0.1) as recommended by the LightGCN authors,
+        # which is crucial for stable inner-product scoring.
         # -----------------------------------------------------------------
         self.user_embedding = nn.Embedding(n_users, embed_dim)
         self.item_embedding = nn.Embedding(n_items, embed_dim)
-        nn.init.xavier_uniform_(self.user_embedding.weight)
-        nn.init.xavier_uniform_(self.item_embedding.weight)
+        nn.init.normal_(self.user_embedding.weight, std=0.1)
+        nn.init.normal_(self.item_embedding.weight, std=0.1)
 
     # -----------------------------------------------------------------
     # FORWARD PASS
@@ -213,14 +213,16 @@ class LightGCN(nn.Module):
     # REGULARISATION LOSS
     # -----------------------------------------------------------------
     def reg_loss(self, user_ids: torch.Tensor,
-                 item_ids: torch.Tensor) -> torch.Tensor:
+                 pos_item_ids: torch.Tensor,
+                 neg_item_ids: torch.Tensor) -> torch.Tensor:
         """
         L2 regularisation on the layer-0 embeddings of the active users/items.
 
         Parameters
         ----------
         user_ids : Tensor (batch,)
-        item_ids : Tensor (batch,)
+        pos_item_ids : Tensor (batch,)
+        neg_item_ids : Tensor (batch,)
 
         Returns
         -------
@@ -233,7 +235,9 @@ class LightGCN(nn.Module):
         sufficient and avoids double-counting.
         """
         u_emb = self.user_embedding(user_ids)
-        i_emb = self.item_embedding(item_ids)
-        # Mean of squared norms (not sum – keeps the scale independent of
-        # batch size)
-        return (u_emb.norm(2).pow(2) + i_emb.norm(2).pow(2)) / (2 * len(user_ids))
+        pos_emb = self.item_embedding(pos_item_ids)
+        neg_emb = self.item_embedding(neg_item_ids)
+        # Sum of squared norms divided by batch size and 2
+        return (1/2) * (u_emb.norm(2).pow(2) + 
+                        pos_emb.norm(2).pow(2) + 
+                        neg_emb.norm(2).pow(2)) / float(len(user_ids))

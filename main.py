@@ -55,9 +55,9 @@ from trainer import PreTrainer, TeacherTrainer, StudentTrainer
 # EASY-ACCESS DEFAULTS  (modify these to avoid typing CLI args)
 # =====================================================================
 DEFAULT_PRETRAIN_EPOCHS  = 300
-DEFAULT_TEACHER_EPOCHS   = 200
-DEFAULT_STUDENT_EPOCHS   = 300
-DEFAULT_EVAL_EVERY       = 5
+DEFAULT_TEACHER_EPOCHS   = 500
+DEFAULT_STUDENT_EPOCHS   = 250
+DEFAULT_EVAL_EVERY       = 10
 
 
 # =====================================================================
@@ -143,9 +143,9 @@ def parse_args():
     parser.add_argument("--data_dir", type=str, default="xmrec/",
                         help="Root data directory (XMRec folder structure)")
     parser.add_argument("--source_markets", type=str, nargs="+",
-                        default=["us"],
+                        default=["ca","es","fr", "in", "it", "jp", "mx", "us", "us"],
                         help="Source market codes, e.g. us uk")
-    parser.add_argument("--target_market", type=str, default="de",
+    parser.add_argument("--target_market", type=str, default="jp",
                         help="Target market code")
     parser.add_argument("--category", type=str, default="Electronics",
                         help="Product category to load, e.g. Electronics. "

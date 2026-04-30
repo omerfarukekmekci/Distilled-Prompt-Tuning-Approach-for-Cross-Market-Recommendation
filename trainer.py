@@ -143,7 +143,7 @@ class PreTrainer:
 
             # BPR loss + L2 regularisation on active base embeddings
             loss = bpr_loss(pos_scores, neg_scores)
-            reg = self.model.reg_loss(users, pos_items) * self.weight_decay
+            reg = self.model.reg_loss(users, pos_items, neg_items) * self.weight_decay
 
             total = loss + reg
 
@@ -267,7 +267,7 @@ class TeacherTrainer:
             neg_scores = (u_emb * neg_emb).sum(dim=-1)
 
             loss = bpr_loss(pos_scores, neg_scores)
-            reg = self.model.reg_loss(users, pos_items) * self.weight_decay
+            reg = self.model.reg_loss(users, pos_items, neg_items) * self.weight_decay
 
             total = loss + reg
 
