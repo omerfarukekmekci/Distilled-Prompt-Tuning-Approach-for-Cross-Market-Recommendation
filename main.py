@@ -43,6 +43,21 @@ import json
 import os
 import torch
 import time
+import sys
+import io
+
+class OutputLogger:
+    def __init__(self, terminal):
+        self.terminal = terminal
+        self.log = io.StringIO()
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
 
 # Local modules
 from data_utils import load_all_markets
@@ -54,9 +69,9 @@ from trainer import PreTrainer, TeacherTrainer, StudentTrainer
 # =====================================================================
 # EASY-ACCESS DEFAULTS  (modify these to avoid typing CLI args)
 # =====================================================================
-DEFAULT_PRETRAIN_EPOCHS  = 300
-DEFAULT_TEACHER_EPOCHS   = 400
-DEFAULT_STUDENT_EPOCHS   = 300
+DEFAULT_PRETRAIN_EPOCHS  = 250
+DEFAULT_TEACHER_EPOCHS   = 500
+DEFAULT_STUDENT_EPOCHS   = 400
 DEFAULT_EVAL_EVERY       = 10
 
 
@@ -238,6 +253,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    output_logger = OutputLogger(sys.stdout)
+    sys.stdout = output_logger
 
     # ---- Device selection ----
     if args.device == "auto":
@@ -566,6 +584,7 @@ def main():
                 "dcmpt": final_metrics,
             },
             "total_time_seconds": round(total_elapsed, 1),
+            "terminal_output": output_logger.log.getvalue(),
         }
 
         with open(result_file, "w", encoding="utf-8") as f:
@@ -577,6 +596,8 @@ def main():
 
     print(f"\nTotal pipeline time: {format_duration(total_elapsed)}")
     print("Done!")
+
+    sys.stdout = output_logger.terminal
 
 
 if __name__ == "__main__":
