@@ -182,7 +182,7 @@ def amrdd_loss(student_scores: torch.Tensor,
                teacher_scores: torch.Tensor,
                pos_mask: torch.Tensor,
                K: int = 50,
-               temperature: float = 1.0) -> torch.Tensor:
+               temperature: float = 1.0):
     """
     Adaptive Market-aware Ranking Decoupled Distillation loss.
 
@@ -193,35 +193,11 @@ def amrdd_loss(student_scores: torch.Tensor,
     containing 1 positive (observed) item and K−1 randomly sampled
     negative (unobserved) items.
 
-    The loss decouples the alignment into two parts:
-
-    a) **Global Preference Alignment** (Eq. 10–11)
-       d = [d⁺, d⁻] is a 2-element distribution capturing the
-       aggregated probability of the positive vs all negatives.
-       We minimise KL(d_T ∥ d_S).
-
-    b) **Fine-grained Preference Alignment** (Eq. 12–13)
-       z = softmax over only the negative items' logits.
-       We minimise KL(z_T ∥ z_S).
-
-    The final objective (Eq. 15, simplified without per-market αm):
-       L = KL(d_T ∥ d_S) + d⁻_T · KL(z_T ∥ z_S)
-
-    The fine-grained loss is weighted by d⁻_T (teacher's confidence
-    in the unobserved set).  When the teacher is very confident about
-    the positive item (d⁺_T ≈ 1), the negative ranking matters less.
-
-    Parameters
-    ----------
-    student_scores : (batch, n_items)  – student logits for all items
-    teacher_scores : (batch, n_items)  – teacher logits (detached)
-    pos_mask       : (batch, n_items)  – bool, True for observed items
-    K              : int  – total items in sampled list (1 pos + K-1 neg)
-    temperature    : float – softmax temperature
-
     Returns
     -------
     loss : scalar Tensor
+    d_pos_S_mean : scalar Tensor  – mean student positive probability
+        (used for α_m computation in multi-market AMRDD)
     """
     batch_size, n_items = student_scores.shape
     K = min(K, n_items)
@@ -231,7 +207,8 @@ def amrdd_loss(student_scores: torch.Tensor,
     # Mask for users that have at least 1 positive item and K-1 negative items
     valid_mask = (pos_mask.sum(dim=1) > 0) & ((~pos_mask).sum(dim=1) >= K - 1)
     if not valid_mask.any():
-        return torch.tensor(0.0, device=device, requires_grad=True)
+        zero = torch.tensor(0.0, device=device, requires_grad=True)
+        return zero, zero.detach()
 
     # Filter to only valid users
     valid_student_scores = student_scores[valid_mask]
@@ -276,11 +253,115 @@ def amrdd_loss(student_scores: torch.Tensor,
     kl_fine = (z_T * torch.log((z_T + eps) / (z_S + eps))).sum(dim=1)  # (N,)
 
     # ==============================================================
-    # Combined loss  (Paper Eq. 15, simplified)
+    # Combined loss  (Paper Eq. 15, single-market component)
     # ==============================================================
     user_loss = kl_global + d_neg_T.squeeze(1) * kl_fine
 
-    return user_loss.mean()
+    # d_pos_S_mean for α_m computation (Eq. 14)
+    d_pos_S_mean = d_pos_S.mean().detach()
+
+    return user_loss.mean(), d_pos_S_mean
+
+
+def amrdd_loss_multi_market(student_user_emb: torch.Tensor,
+                            student_item_emb: torch.Tensor,
+                            teacher_user_emb: torch.Tensor,
+                            teacher_item_emb: torch.Tensor,
+                            source_market_data: dict,
+                            K: int = 50,
+                            temperature: float = 1.0,
+                            batch_size: int = 16,
+                            device: str = "cpu"):
+    """
+    Multi-market AMRDD with adaptive α_m weighting (Paper Eq. 14–15).
+
+    For each source market m, samples a batch of users, computes
+    student and teacher score distributions, and combines losses
+    weighted by market similarity α_m.
+
+    Parameters
+    ----------
+    student_user_emb : (n_users, dim) – student's user embeddings
+    student_item_emb : (n_items, dim) – student's item embeddings
+    teacher_user_emb : (n_users, dim) – teacher's user embeddings
+    teacher_item_emb : (n_items, dim) – teacher's item embeddings
+    source_market_data : dict[str, dict]
+        Per-market data with keys: 'user_list', 'user_pos'
+    K : int – items per sampled list (1 pos + K-1 neg)
+    temperature : float
+    batch_size : int – users to sample per source market
+    device : str
+
+    Returns
+    -------
+    loss : scalar Tensor
+    """
+    import random as _random
+
+    n_items = student_item_emb.shape[0]
+    eps = 1e-10
+
+    # Collect per-market losses and d_pos_S values
+    market_losses = {}
+    market_d_pos_S = {}
+
+    for m, mdata in source_market_data.items():
+        user_list = mdata['user_list']
+        user_pos = mdata['user_pos']
+
+        if len(user_list) == 0:
+            continue
+
+        # Sample a batch of users from this source market
+        sample_size = min(batch_size, len(user_list))
+        batch_users = _random.sample(user_list, sample_size)
+        user_ids = torch.LongTensor(batch_users).to(device)
+
+        # Student and teacher scores for these users
+        s_scores = student_user_emb[user_ids] @ student_item_emb.t()  # (B, n_items)
+        t_scores = teacher_user_emb[user_ids] @ teacher_item_emb.t()  # (B, n_items)
+
+        # Build positive mask for these users
+        pos_mask = torch.zeros(len(batch_users), n_items,
+                               dtype=torch.bool, device=device)
+        for idx, u in enumerate(batch_users):
+            pos_items = list(user_pos.get(u, set()))
+            if len(pos_items) > 0:
+                pos_mask[idx, pos_items] = True
+
+        # Compute AMRDD loss for this market
+        loss_m, d_pos_S_m = amrdd_loss(
+            s_scores, t_scores.detach(), pos_mask,
+            K=K, temperature=temperature
+        )
+
+        market_losses[m] = loss_m
+        market_d_pos_S[m] = d_pos_S_m
+
+    if len(market_losses) == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    # --- Compute teacher's d_pos_T on target data (for α_m reference) ---
+    # We use the mean d_pos_S across all markets as a proxy for d_pos_T
+    # when the teacher batch is not available. In practice, the teacher's
+    # positive preference is high (close to 1.0), so α_m mainly
+    # discriminates between source markets.
+    d_pos_T = sum(market_d_pos_S.values()) / len(market_d_pos_S)
+
+    # --- Compute α_m weights (Paper Eq. 14) ---
+    alpha_raw = {}
+    for m, d_pos_S_m in market_d_pos_S.items():
+        alpha_raw[m] = torch.exp(-torch.abs(d_pos_S_m - d_pos_T))
+
+    alpha_sum = sum(alpha_raw.values()) + eps
+
+    # --- Weighted sum of losses (Paper Eq. 15) ---
+    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    for m in market_losses:
+        alpha_m = alpha_raw[m] / alpha_sum
+        total_loss = total_loss + alpha_m * market_losses[m]
+
+    return total_loss
 
 
 # =========================================================================

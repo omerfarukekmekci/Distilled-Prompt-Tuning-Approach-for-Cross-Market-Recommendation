@@ -143,9 +143,9 @@ def parse_args():
     parser.add_argument("--data_dir", type=str, default="xmrec/",
                         help="Root data directory (XMRec folder structure)")
     parser.add_argument("--source_markets", type=str, nargs="+",
-                        default=["ca","es","fr", "in", "it", "jp", "mx", "us", "us"],
+                        default=["ca","es","fr","in","it","jp","mx","us"],
                         help="Source market codes, e.g. us uk")
-    parser.add_argument("--target_market", type=str, default="jp",
+    parser.add_argument("--target_market", type=str, default="de",
                         help="Target market code")
     parser.add_argument("--category", type=str, default="Electronics",
                         help="Product category to load, e.g. Electronics. "
@@ -360,6 +360,20 @@ def main():
         # Save checkpoint
         save_checkpoint(teacher, args.checkpoint_dir, teacher_ckpt)
 
+    # Evaluate Teacher Performance
+    from evaluate import evaluate_model_both
+    print("\n  Evaluating Teacher (Upper Bound)...")
+    teacher_metrics = evaluate_model_both(
+        teacher, data["target_adj_train"].to(device),
+        data["target_test"], n_items,
+        args.k_list,
+        train_interactions=data["target_train_interactions"],
+        val_dict=data["target_val"],
+        prompt_module=None,
+        device=device,
+    )
+    print(f"  Teacher Test NDCG@{min(args.k_list)} (Sampled): {teacher_metrics.get(f'sampled/NDCG@{min(args.k_list)}', 0.0):.4f}")
+
     # ==================================================================
     # STEP 4:  TRAIN THE STUDENT  (prompts only, backbone frozen)
     # ==================================================================
@@ -406,6 +420,7 @@ def main():
             target_adj=data["target_adj_train"],
             target_interactions=data["target_train_interactions"],
             n_items=n_items,
+            source_market_interactions=data.get("source_market_interactions"),
             alpha=args.alpha,
             beta=args.beta,
             gamma=args.gamma,
@@ -557,6 +572,7 @@ def main():
             },
             "metrics": {
                 "baseline": baseline_metrics,
+                "teacher": teacher_metrics,
                 "dcmpt": final_metrics,
             },
             "total_time_seconds": round(total_elapsed, 1),

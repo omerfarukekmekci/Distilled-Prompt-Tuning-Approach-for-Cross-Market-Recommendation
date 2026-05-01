@@ -42,7 +42,7 @@ from collections import defaultdict
 # Local modules
 from lightgcn import LightGCN
 from prompt import PromptModule
-from losses import bpr_loss, wrd_loss, amrdd_loss, total_loss
+from losses import bpr_loss, wrd_loss, amrdd_loss, amrdd_loss_multi_market, total_loss
 from evaluate import evaluate_model
 from data_utils import build_bpr_triplets
 
@@ -81,10 +81,10 @@ class PreTrainer:
         self.device = device
         self.weight_decay = weight_decay
 
-        # Adam is the standard optimiser used in recommendation GNN papers.
-        # weight_decay adds implicit L2 regularisation on all parameters.
+        # Adam optimiser. L2 regularisation is handled explicitly via
+        # reg_loss() to match the paper's formulation (no double-reg).
         self.optimizer = optim.Adam(
-            model.parameters(), lr=lr, weight_decay=weight_decay
+            model.parameters(), lr=lr
         )
 
         # LR scheduler will be created in train() once we know n_epochs
@@ -229,7 +229,7 @@ class TeacherTrainer:
         self.weight_decay = weight_decay
 
         self.optimizer = optim.Adam(
-            model.parameters(), lr=lr, weight_decay=weight_decay
+            model.parameters(), lr=lr
         )
 
         self.user_pos = defaultdict(set)
@@ -339,6 +339,7 @@ class StudentTrainer:
                  target_adj,
                  target_interactions,
                  n_items: int,
+                 source_market_interactions: dict = None,
                  alpha: float = 1.0,
                  beta: float = 0.5,
                  gamma: float = 0.5,
@@ -394,6 +395,18 @@ class StudentTrainer:
         # Get the unique users who appear in the target market training set,
         # used for sampling batches during distillation.
         self.train_users = list(self.user_pos.keys())
+
+        # Pre-compute per-source-market user data for AMRDD α_m
+        self.source_market_data = {}
+        if source_market_interactions:
+            for m, interactions in source_market_interactions.items():
+                m_user_pos = defaultdict(set)
+                for u, i in interactions:
+                    m_user_pos[u].add(i)
+                self.source_market_data[m] = {
+                    'user_list': list(m_user_pos.keys()),
+                    'user_pos': dict(m_user_pos),
+                }
 
     def train_epoch(self, batch_size: int = 1024):
         """
@@ -509,21 +522,32 @@ class StudentTrainer:
             )
 
             # ----------------------------------------------------------
-            # AMRDD Loss
+            # AMRDD Loss (multi-market with α_m weighting, Eq. 14-15)
             # ----------------------------------------------------------
-            pos_mask = torch.zeros(
-                len(batch_users), self.n_items,
-                dtype=torch.bool, device=self.device
-            )
-            for idx, u in enumerate(batch_users):
-                pos_items_list = list(self.user_pos[u])
-                if len(pos_items_list) > 0:
-                    pos_mask[idx, pos_items_list] = True
+            if self.source_market_data:
+                l_amrdd = amrdd_loss_multi_market(
+                    student_user_emb, student_item_emb,
+                    teacher_user_emb, teacher_item_emb,
+                    self.source_market_data,
+                    K=self.K, temperature=self.amrdd_temperature,
+                    batch_size=len(batch_users),
+                    device=self.device
+                )
+            else:
+                # Fallback: single-market AMRDD on target data
+                pos_mask = torch.zeros(
+                    len(batch_users), self.n_items,
+                    dtype=torch.bool, device=self.device
+                )
+                for idx, u in enumerate(batch_users):
+                    pos_items_list = list(self.user_pos[u])
+                    if len(pos_items_list) > 0:
+                        pos_mask[idx, pos_items_list] = True
 
-            l_amrdd = amrdd_loss(
-                student_scores, teacher_scores.detach(),
-                pos_mask, K=self.K, temperature=self.amrdd_temperature
-            )
+                l_amrdd, _ = amrdd_loss(
+                    student_scores, teacher_scores.detach(),
+                    pos_mask, K=self.K, temperature=self.amrdd_temperature
+                )
 
             # ----------------------------------------------------------
             # Combine & Backprop (Prompt parameters only)
@@ -617,7 +641,8 @@ class StudentTrainer:
                     )
                     print(f"    [Val] {metrics_str}{marker}")
 
-                # Early stopping check (DISABLED as per user request)
+                # Early stopping (paper: patience = 10)
+                # DISABLED as per user request
                 # if patience_counter >= patience:
                 #     if verbose:
                 #         print(f"  ⚡ Early stopping at epoch {epoch} "

@@ -528,13 +528,7 @@ def load_all_markets(data_dir: str, source_markets: list, target_market: str,
     n_items = len(item2id)
     print(f"  Global space: {n_users:,} users, {n_items:,} items")
 
-    # ---- Combined graph for pre-training ----
-    combined_adj, combined_interactions = build_combined_graph(
-        market_dfs, user2id, item2id
-    )
-    print(f"  Combined graph: {len(combined_interactions):,} edges")
-
-    # ---- Target market: split and build training graph ----
+    # ---- Target market: split FIRST to prevent data leakage ----
     target_df = market_dfs[target_market]
     _, target_full_interactions = build_market_graph(target_df, user2id, item2id)
 
@@ -545,17 +539,34 @@ def load_all_markets(data_dir: str, source_markets: list, target_market: str,
     print(f"  Target train: {len(train_inter):,} edges, "
           f"val users: {len(val_dict):,}, test users: {len(test_dict):,}")
 
+    # ---- Build per-source-market interactions (for AMRDD α_m) ----
+    source_market_interactions = {}
+    for m in source_markets:
+        _, source_inter = build_market_graph(market_dfs[m], user2id, item2id)
+        source_market_interactions[m] = source_inter
+        print(f"  Source {m}: {len(source_inter):,} edges")
+
+    # ---- Combined graph for pre-training (LEAK-FREE) ----
+    # Only target TRAINING edges + full source market data
+    all_combined = list(train_inter)
+    for m_inter in source_market_interactions.values():
+        all_combined.extend(m_inter)
+    all_combined = list(set(all_combined))
+    combined_adj = build_adj_matrix(all_combined, n_users, n_items)
+    print(f"  Combined graph (leak-free): {len(all_combined):,} edges")
+
     return {
         "user2id": user2id,
         "item2id": item2id,
         "n_users": n_users,
         "n_items": n_items,
         "combined_adj": combined_adj,
-        "combined_interactions": combined_interactions,
+        "combined_interactions": all_combined,
         "target_adj_train": target_adj_train,
         "target_train_interactions": train_inter,
         "target_val": val_dict,
         "target_test": test_dict,
         "target_full_interactions": target_full_interactions,
+        "source_market_interactions": source_market_interactions,
         "market_dfs": market_dfs,
     }
