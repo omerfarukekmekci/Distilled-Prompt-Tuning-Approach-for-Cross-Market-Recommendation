@@ -249,15 +249,14 @@ class TeacherTrainer:
         total_loss_val = 0.0
         n_batches = 0
 
-        # PERFORMANCE FIX: Compute full-graph embeddings ONCE per epoch
-        batch_size = max(batch_size, 262144)
-        user_emb, item_emb = self.model(self.adj)
-
         for start in range(0, len(triplets), batch_size):
             batch = triplets[start : start + batch_size]
             users = torch.LongTensor([t[0] for t in batch]).to(self.device)
             pos_items = torch.LongTensor([t[1] for t in batch]).to(self.device)
             neg_items = torch.LongTensor([t[2] for t in batch]).to(self.device)
+
+            # Fresh forward pass each batch so backward() has a valid graph
+            user_emb, item_emb = self.model(self.adj)
 
             u_emb = user_emb[users]
             pos_emb = item_emb[pos_items]
@@ -523,14 +522,18 @@ class StudentTrainer:
 
             # ----------------------------------------------------------
             # AMRDD Loss (multi-market with α_m weighting, Eq. 14-15)
+            # Uses TARGET users, but compares against source market
+            # item distributions to find which source markets are most
+            # similar to the target (correct paper interpretation).
             # ----------------------------------------------------------
             if self.source_market_data:
                 l_amrdd = amrdd_loss_multi_market(
-                    student_user_emb, student_item_emb,
-                    teacher_user_emb, teacher_item_emb,
+                    batch_student_user, student_item_emb,
+                    batch_teacher_user, teacher_item_emb,
+                    batch_users,
                     self.source_market_data,
+                    self.user_pos,
                     K=self.K, temperature=self.amrdd_temperature,
-                    batch_size=len(batch_users),
                     device=self.device
                 )
             else:

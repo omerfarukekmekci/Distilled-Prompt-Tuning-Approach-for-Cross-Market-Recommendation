@@ -328,9 +328,8 @@ def main():
     print("STEP 3:  Training teacher on target market")
     print("=" * 60)
 
-    teacher = LightGCN(n_users, n_items,
-                       embed_dim=args.embed_dim,
-                       n_layers=args.n_layers)
+    import copy
+    teacher = copy.deepcopy(backbone)  # start from pre-trained backbone weights
 
     # Check for existing checkpoint
     if not args.force_retrain and load_checkpoint(

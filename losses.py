@@ -263,105 +263,108 @@ def amrdd_loss(student_scores: torch.Tensor,
     return user_loss.mean(), d_pos_S_mean
 
 
-def amrdd_loss_multi_market(student_user_emb: torch.Tensor,
+def amrdd_loss_multi_market(batch_student_user: torch.Tensor,
                             student_item_emb: torch.Tensor,
-                            teacher_user_emb: torch.Tensor,
+                            batch_teacher_user: torch.Tensor,
                             teacher_item_emb: torch.Tensor,
+                            batch_users: list,
                             source_market_data: dict,
+                            target_user_pos: dict,
                             K: int = 50,
                             temperature: float = 1.0,
-                            batch_size: int = 16,
                             device: str = "cpu"):
     """
     Multi-market AMRDD with adaptive α_m weighting (Paper Eq. 14–15).
 
-    For each source market m, samples a batch of users, computes
-    student and teacher score distributions, and combines losses
-    weighted by market similarity α_m.
+    **Correct implementation:** Uses TARGET market users (already propagated
+    through the target adjacency) and treats each SOURCE market's item sets
+    as the positive reference for those users.
+
+    The key insight: α_m measures which source market's item distribution is
+    most similar to the target market (via the teacher). We use target users
+    so their embeddings are properly computed with neighbor aggregation.
 
     Parameters
     ----------
-    student_user_emb : (n_users, dim) – student's user embeddings
-    student_item_emb : (n_items, dim) – student's item embeddings
-    teacher_user_emb : (n_users, dim) – teacher's user embeddings
-    teacher_item_emb : (n_items, dim) – teacher's item embeddings
-    source_market_data : dict[str, dict]
-        Per-market data with keys: 'user_list', 'user_pos'
-    K : int – items per sampled list (1 pos + K-1 neg)
-    temperature : float
-    batch_size : int – users to sample per source market
-    device : str
+    batch_student_user : (B, dim) – student embeddings for current batch
+    student_item_emb   : (n_items, dim) – student item embeddings
+    batch_teacher_user : (B, dim) – teacher embeddings for current batch
+    teacher_item_emb   : (n_items, dim) – teacher item embeddings
+    batch_users        : list[int] – global user IDs for this batch
+    source_market_data : dict[str, dict] with keys 'user_pos'
+        Source market positive item sets (global item IDs)
+    target_user_pos    : dict[int, set] – target market positive sets
+    K                  : int – items per sampled list (1 pos + K-1 neg)
+    temperature        : float
+    device             : str
 
     Returns
     -------
     loss : scalar Tensor
     """
-    import random as _random
-
     n_items = student_item_emb.shape[0]
     eps = 1e-10
 
-    # Collect per-market losses and d_pos_S values
+    # Pre-compute full score matrices for the batch (B, n_items)
+    s_scores = batch_student_user @ student_item_emb.t()
+    t_scores = (batch_teacher_user @ teacher_item_emb.t()).detach()
+
     market_losses = {}
     market_d_pos_S = {}
 
     for m, mdata in source_market_data.items():
-        user_list = mdata['user_list']
-        user_pos = mdata['user_pos']
+        source_user_pos = mdata['user_pos']
 
-        if len(user_list) == 0:
-            continue
-
-        # Sample a batch of users from this source market
-        sample_size = min(batch_size, len(user_list))
-        batch_users = _random.sample(user_list, sample_size)
-        user_ids = torch.LongTensor(batch_users).to(device)
-
-        # Student and teacher scores for these users
-        s_scores = student_user_emb[user_ids] @ student_item_emb.t()  # (B, n_items)
-        t_scores = teacher_user_emb[user_ids] @ teacher_item_emb.t()  # (B, n_items)
-
-        # Build positive mask for these users
+        # For each target user in the batch, use SOURCE market m's positive
+        # items as the "positive" reference set. If a target user has no
+        # interactions in source market m, fall back to their target positives.
         pos_mask = torch.zeros(len(batch_users), n_items,
                                dtype=torch.bool, device=device)
+        valid_count = 0
         for idx, u in enumerate(batch_users):
-            pos_items = list(user_pos.get(u, set()))
+            # Use source market m's positives if available, else target
+            src_pos = source_user_pos.get(u, set())
+            tgt_pos = target_user_pos.get(u, set())
+            pos_items = list(src_pos) if len(src_pos) > 0 else list(tgt_pos)
             if len(pos_items) > 0:
                 pos_mask[idx, pos_items] = True
+                valid_count += 1
 
-        # Compute AMRDD loss for this market
+        if valid_count == 0:
+            continue
+
         loss_m, d_pos_S_m = amrdd_loss(
-            s_scores, t_scores.detach(), pos_mask,
+            s_scores, t_scores, pos_mask,
             K=K, temperature=temperature
         )
-
         market_losses[m] = loss_m
         market_d_pos_S[m] = d_pos_S_m
 
     if len(market_losses) == 0:
         return torch.tensor(0.0, device=device, requires_grad=True)
 
-    # --- Compute teacher's d_pos_T on target data (for α_m reference) ---
-    # We use the mean d_pos_S across all markets as a proxy for d_pos_T
-    # when the teacher batch is not available. In practice, the teacher's
-    # positive preference is high (close to 1.0), so α_m mainly
-    # discriminates between source markets.
-    d_pos_T = sum(market_d_pos_S.values()) / len(market_d_pos_S)
+    # α_m: compute teacher's d_pos_T using TARGET positives as reference
+    target_pos_mask = torch.zeros(len(batch_users), n_items,
+                                  dtype=torch.bool, device=device)
+    for idx, u in enumerate(batch_users):
+        tgt_pos = list(target_user_pos.get(u, set()))
+        if len(tgt_pos) > 0:
+            target_pos_mask[idx, tgt_pos] = True
 
-    # --- Compute α_m weights (Paper Eq. 14) ---
-    alpha_raw = {}
-    for m, d_pos_S_m in market_d_pos_S.items():
-        alpha_raw[m] = torch.exp(-torch.abs(d_pos_S_m - d_pos_T))
+    _, d_pos_T = amrdd_loss(t_scores, t_scores, target_pos_mask,
+                            K=K, temperature=temperature)
 
+    # α_m = exp(-|d_m^{+S} - d^{+T}|) / Σ exp(-|d_k^{+S} - d^{+T}|)
+    alpha_raw = {m: torch.exp(-torch.abs(d - d_pos_T))
+                 for m, d in market_d_pos_S.items()}
     alpha_sum = sum(alpha_raw.values()) + eps
 
-    # --- Weighted sum of losses (Paper Eq. 15) ---
-    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
-    for m in market_losses:
-        alpha_m = alpha_raw[m] / alpha_sum
-        total_loss = total_loss + alpha_m * market_losses[m]
+    total = sum((alpha_raw[m] / alpha_sum) * market_losses[m]
+                for m in market_losses)
+    return total
 
-    return total_loss
+
+
 
 
 # =========================================================================
