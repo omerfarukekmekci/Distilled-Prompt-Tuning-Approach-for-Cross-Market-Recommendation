@@ -1,0 +1,73 @@
+{
+  "timestamp": "20260514_192945",
+  "source_markets": [
+    "ca",
+    "es",
+    "fr",
+    "in",
+    "it",
+    "jp",
+    "mx",
+    "us"
+  ],
+  "target_market": "de",
+  "category": "Electronics",
+  "config": {
+    "embed_dim": 64,
+    "n_layers": 3,
+    "n_prompts": 10,
+    "alpha": 0.5,
+    "beta": 1.0,
+    "gamma": 1.0,
+    "student_lr": 0.0001,
+    "student_batch": 16,
+    "student_epochs": 250,
+    "wrd_K": 50,
+    "wrd_lambda": 1.0,
+    "wrd_mu": 1.0,
+    "amrdd_temp": 1.0,
+    "pretrain_epochs": 300,
+    "teacher_epochs": 500
+  },
+  "data_stats": {
+    "n_users": 148118,
+    "n_items": 24374,
+    "combined_edges": 1010194,
+    "target_train_edges": 51383,
+    "val_users": 11393,
+    "test_users": 11393
+  },
+  "metrics": {
+    "baseline": {
+      "full/Recall@10": 0.40296673395944876,
+      "full/Recall@20": 0.46579771204540804,
+      "full/NDCG@10": 0.32211992046131704,
+      "full/NDCG@20": 0.3379571080291664,
+      "sampled/Recall@10": 0.9952602475204073,
+      "sampled/Recall@20": 0.9991222680593347,
+      "sampled/NDCG@10": 0.8537516993395249,
+      "sampled/NDCG@20": 0.8547827863931736
+    },
+    "teacher": {
+      "full/Recall@10": 0.6244214283624447,
+      "full/Recall@20": 0.6579361596301823,
+      "full/NDCG@10": 0.5599252419324704,
+      "full/NDCG@20": 0.568417929212853,
+      "sampled/Recall@10": 0.9502325989642764,
+      "sampled/Recall@20": 0.9537435267269376,
+      "sampled/NDCG@10": 0.8623899061436745,
+      "sampled/NDCG@20": 0.863309289231368
+    },
+    "dcmpt": {
+      "full/Recall@10": 0.48627812399426545,
+      "full/Recall@20": 0.5456713186459522,
+      "full/NDCG@10": 0.41323462306822667,
+      "full/NDCG@20": 0.42828896759396073,
+      "sampled/Recall@10": 0.9833230931273589,
+      "sampled/Recall@20": 0.9949969279382077,
+      "sampled/NDCG@10": 0.8636232987161088,
+      "sampled/NDCG@20": 0.8666609514553215
+    }
+  },
+  "total_time_seconds": 13391.5
+}

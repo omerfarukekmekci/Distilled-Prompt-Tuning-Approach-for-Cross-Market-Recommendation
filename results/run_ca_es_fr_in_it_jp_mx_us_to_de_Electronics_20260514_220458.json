@@ -1,0 +1,77 @@
+{
+  "timestamp": "20260514_220458",
+  "source_markets": [
+    "ca",
+    "es",
+    "fr",
+    "in",
+    "it",
+    "jp",
+    "mx",
+    "us"
+  ],
+  "target_market": "de",
+  "category": "Electronics",
+  "config": {
+    "embed_dim": 64,
+    "n_layers": 3,
+    "n_prompts": 20,
+    "alpha": 0.3,
+    "beta": 1.0,
+    "gamma": 1.0,
+    "delta": 1.0,
+    "epsilon": 0.5,
+    "distill_temp": 5.0,
+    "distill_K": 100,
+    "student_lr": 0.0005,
+    "student_batch": 64,
+    "student_epochs": 300,
+    "wrd_K": 50,
+    "wrd_lambda": 1.0,
+    "wrd_mu": 1.0,
+    "amrdd_temp": 1.0,
+    "pretrain_epochs": 300,
+    "teacher_epochs": 500
+  },
+  "data_stats": {
+    "n_users": 148118,
+    "n_items": 24374,
+    "combined_edges": 1010194,
+    "target_train_edges": 51383,
+    "val_users": 11393,
+    "test_users": 11393
+  },
+  "metrics": {
+    "baseline": {
+      "full/Recall@10": 0.3973711928377074,
+      "full/Recall@20": 0.46540273267210863,
+      "full/NDCG@10": 0.31952212630841587,
+      "full/NDCG@20": 0.3367110124247397,
+      "sampled/Recall@10": 0.9953480207144738,
+      "sampled/Recall@20": 0.9992100412534012,
+      "sampled/NDCG@10": 0.8537576254509308,
+      "sampled/NDCG@20": 0.8547879212218
+    },
+    "teacher": {
+      "full/Recall@10": 0.6221539541823927,
+      "full/Recall@20": 0.6582141080780596,
+      "full/NDCG@10": 0.5600242988983595,
+      "full/NDCG@20": 0.5691660445926009,
+      "sampled/Recall@10": 0.9518125164574739,
+      "sampled/Recall@20": 0.9554112174142017,
+      "sampled/NDCG@10": 0.8634191913758481,
+      "sampled/NDCG@20": 0.8643579295108145
+    },
+    "dcmpt": {
+      "full/Recall@10": 0.509976886392229,
+      "full/Recall@20": 0.5562333596652915,
+      "full/NDCG@10": 0.45045863518440676,
+      "full/NDCG@20": 0.462178166668091,
+      "sampled/Recall@10": 0.9832353199332924,
+      "sampled/Recall@20": 0.9901694022645484,
+      "sampled/NDCG@10": 0.8668195273797034,
+      "sampled/NDCG@20": 0.8686332410908996
+    }
+  },
+  "total_time_seconds": 6647.2
+}

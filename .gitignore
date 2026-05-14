@@ -1,4 +1,4 @@
 /xmrec
 /__pycache__
 /checkpoints
-.code-workspace
+*.code-workspace
