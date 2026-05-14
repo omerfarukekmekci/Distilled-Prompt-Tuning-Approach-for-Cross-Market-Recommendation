@@ -50,19 +50,19 @@ from lightgcn import LightGCN
 from prompt import PromptModule
 from trainer import PreTrainer, TeacherTrainer, StudentTrainer
 
-
 # =====================================================================
 # EASY-ACCESS DEFAULTS  (modify these to avoid typing CLI args)
 # =====================================================================
-DEFAULT_PRETRAIN_EPOCHS  = 300
-DEFAULT_TEACHER_EPOCHS   = 500
-DEFAULT_STUDENT_EPOCHS   = 250
-DEFAULT_EVAL_EVERY       = 10
+DEFAULT_PRETRAIN_EPOCHS = 300
+DEFAULT_TEACHER_EPOCHS = 500
+DEFAULT_STUDENT_EPOCHS = 200
+DEFAULT_EVAL_EVERY = 10
 
 
 # =====================================================================
 # CHECKPOINT HELPERS
 # =====================================================================
+
 
 def _checkpoint_path(checkpoint_dir: str, name: str) -> str:
     """Build the full path for a named checkpoint file."""
@@ -111,6 +111,7 @@ def checkpoint_exists(checkpoint_dir: str, name: str) -> bool:
 # FORMATTING HELPERS
 # =====================================================================
 
+
 def format_duration(seconds: float) -> str:
     """Pretty-print a duration in h/m/s."""
     if seconds < 60:
@@ -128,6 +129,7 @@ def format_duration(seconds: float) -> str:
 # CLI ARGUMENTS
 # =====================================================================
 
+
 def parse_args():
     """
     Parse command-line arguments.
@@ -140,91 +142,184 @@ def parse_args():
     )
 
     # ---- Data ----
-    parser.add_argument("--data_dir", type=str, default="xmrec/",
-                        help="Root data directory (XMRec folder structure)")
-    parser.add_argument("--source_markets", type=str, nargs="+",
-                        default=["ca","es","fr","in","it","jp","mx","us"],
-                        help="Source market codes, e.g. us uk")
-    parser.add_argument("--target_market", type=str, default="de",
-                        help="Target market code")
-    parser.add_argument("--category", type=str, default="Electronics",
-                        help="Product category to load, e.g. Electronics. "
-                             "The paper evaluates per-category.")
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="xmrec/",
+        help="Root data directory (XMRec folder structure)",
+    )
+    parser.add_argument(
+        "--source_markets",
+        type=str,
+        nargs="+",
+        default=["ca", "es", "fr", "in", "it", "jp", "mx", "us", "uk"],
+        help="Source market codes, e.g. us uk",
+    )
+    parser.add_argument(
+        "--target_market", type=str, default="de", help="Target market code"
+    )
+    parser.add_argument(
+        "--category",
+        type=str,
+        default="Electronics",
+        help="Product category to load, e.g. Electronics. "
+        "The paper evaluates per-category.",
+    )
 
     # ---- Model architecture ----
-    parser.add_argument("--embed_dim", type=int, default=64,
-                        help="Embedding dimensionality for LightGCN")
-    parser.add_argument("--n_layers", type=int, default=3,
-                        help="Number of LightGCN propagation layers")
-    parser.add_argument("--n_prompts", type=int, default=10,
-                        help="Number of prompt basis vectors per entity type "
-                             "(user/item). Paper Fig.5: ~10 for rich markets, "
-                             "~20 for sparse markets.")
+    parser.add_argument(
+        "--embed_dim",
+        type=int,
+        default=64,
+        help="Embedding dimensionality for LightGCN",
+    )
+    parser.add_argument(
+        "--n_layers", type=int, default=3, help="Number of LightGCN propagation layers"
+    )
+    parser.add_argument(
+        "--n_prompts",
+        type=int,
+        default=20,
+        help="Number of prompt basis vectors per entity type "
+        "(user/item). Paper Fig.5: ~10 for rich markets, "
+        "~20 for sparse markets.",
+    )
 
     # ---- Pre-training ----
-    parser.add_argument("--pretrain_epochs", type=int, default=DEFAULT_PRETRAIN_EPOCHS,
-                        help="Epochs for pre-training on combined graph")
-    parser.add_argument("--pretrain_lr", type=float, default=1e-3,
-                        help="Learning rate for pre-training")
-    parser.add_argument("--pretrain_batch", type=int, default=1024,
-                        help="Batch size for pre-training")
+    parser.add_argument(
+        "--pretrain_epochs",
+        type=int,
+        default=DEFAULT_PRETRAIN_EPOCHS,
+        help="Epochs for pre-training on combined graph",
+    )
+    parser.add_argument(
+        "--pretrain_lr", type=float, default=1e-3, help="Learning rate for pre-training"
+    )
+    parser.add_argument(
+        "--pretrain_batch", type=int, default=1024, help="Batch size for pre-training"
+    )
 
     # ---- Teacher training ----
-    parser.add_argument("--teacher_epochs", type=int, default=DEFAULT_TEACHER_EPOCHS,
-                        help="Epochs for teacher on target market")
-    parser.add_argument("--teacher_lr", type=float, default=1e-3,
-                        help="Learning rate for teacher")
-    parser.add_argument("--teacher_batch", type=int, default=1024,
-                        help="Batch size for teacher")
+    parser.add_argument(
+        "--teacher_epochs",
+        type=int,
+        default=DEFAULT_TEACHER_EPOCHS,
+        help="Epochs for teacher on target market",
+    )
+    parser.add_argument(
+        "--teacher_lr", type=float, default=1e-3, help="Learning rate for teacher"
+    )
+    parser.add_argument(
+        "--teacher_batch", type=int, default=1024, help="Batch size for teacher"
+    )
 
     # ---- Student training ----
-    parser.add_argument("--student_epochs", type=int, default=DEFAULT_STUDENT_EPOCHS,
-                        help="Epochs for student prompt training")
-    parser.add_argument("--student_lr", type=float, default=1e-4,
-                        help="Learning rate for prompt tuning (paper uses 1e-4)")
-    parser.add_argument("--student_batch", type=int, default=16,
-                        help="Batch size for student (paper uses 16 users per batch)")
+    parser.add_argument(
+        "--student_epochs",
+        type=int,
+        default=DEFAULT_STUDENT_EPOCHS,
+        help="Epochs for student prompt training",
+    )
+    parser.add_argument(
+        "--student_lr", type=float, default=5e-4, help="Learning rate for prompt tuning"
+    )
+    parser.add_argument(
+        "--student_batch",
+        type=int,
+        default=64,
+        help="Batch size for student (number of users per batch)",
+    )
 
     # ---- Loss weights  (L_total = α·BPR + β·WRD + γ·AMRDD) ----
-    parser.add_argument("--alpha", type=float, default=0.5,
-                        help="Weight for BPR loss (paper: 0.5 optimal)")
-    parser.add_argument("--beta", type=float, default=1.0,
-                        help="Weight for WRD loss")
-    parser.add_argument("--gamma", type=float, default=1.0,
-                        help="Weight for AMRDD loss")
+    parser.add_argument("--alpha", type=float, default=0.3, help="Weight for BPR loss")
+    parser.add_argument("--beta", type=float, default=1.0, help="Weight for WRD loss")
+    parser.add_argument(
+        "--gamma", type=float, default=1.0, help="Weight for AMRDD loss"
+    )
 
     # ---- WRD hyperparameters ----
-    parser.add_argument("--wrd_K", type=int, default=50,
-                        help="Top-K items for WRD distillation")
-    parser.add_argument("--wrd_lambda", type=float, default=1.0,
-                        help="Position weight temperature (λ)")
-    parser.add_argument("--wrd_mu", type=float, default=1.0,
-                        help="Deviation weight sensitivity (μ)")
+    parser.add_argument(
+        "--wrd_K", type=int, default=50, help="Top-K items for WRD distillation"
+    )
+    parser.add_argument(
+        "--wrd_lambda", type=float, default=1.0, help="Position weight temperature (λ)"
+    )
+    parser.add_argument(
+        "--wrd_mu", type=float, default=1.0, help="Deviation weight sensitivity (μ)"
+    )
 
     # ---- AMRDD hyperparameters ----
-    parser.add_argument("--amrdd_temp", type=float, default=1.0,
-                        help="Softmax temperature for AMRDD")
+    parser.add_argument(
+        "--amrdd_temp", type=float, default=1.0, help="Softmax temperature for AMRDD"
+    )
+
+    # ---- Enhanced distillation hyperparameters ----
+    parser.add_argument(
+        "--delta",
+        type=float,
+        default=1.0,
+        help="Weight for direct score distillation loss",
+    )
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=0.5,
+        help="Weight for listwise KL distillation loss",
+    )
+    parser.add_argument(
+        "--distill_temp",
+        type=float,
+        default=5.0,
+        help="Temperature for listwise distillation softmax",
+    )
+    parser.add_argument(
+        "--distill_K",
+        type=int,
+        default=100,
+        help="Top-K items for direct score distillation",
+    )
 
     # ---- Evaluation ----
-    parser.add_argument("--k_list", type=int, nargs="+", default=[10, 20],
-                        help="K values for Recall@K and NDCG@K")
-    parser.add_argument("--eval_every", type=int, default=DEFAULT_EVAL_EVERY,
-                        help="Evaluate student every N epochs")
+    parser.add_argument(
+        "--k_list",
+        type=int,
+        nargs="+",
+        default=[10, 20],
+        help="K values for Recall@K and NDCG@K",
+    )
+    parser.add_argument(
+        "--eval_every",
+        type=int,
+        default=DEFAULT_EVAL_EVERY,
+        help="Evaluate student every N epochs",
+    )
 
     # ---- Checkpointing ----
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/",
-                        help="Directory to save/load model checkpoints")
-    parser.add_argument("--force_retrain", action="store_true",
-                        help="Ignore existing checkpoints and retrain "
-                             "everything from scratch")
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="checkpoints/",
+        help="Directory to save/load model checkpoints",
+    )
+    parser.add_argument(
+        "--force_retrain",
+        action="store_true",
+        help="Ignore existing checkpoints and retrain " "everything from scratch",
+    )
 
     # ---- General ----
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility")
-    parser.add_argument("--device", type=str, default="auto",
-                        help="Device: 'cpu', 'cuda', or 'auto'")
-    parser.add_argument("--weight_decay", type=float, default=1e-6,
-                        help="L2 regularisation (paper uses 1e-6)")
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for reproducibility"
+    )
+    parser.add_argument(
+        "--device", type=str, default="auto", help="Device: 'cpu', 'cuda', or 'auto'"
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-6,
+        help="L2 regularisation (paper uses 1e-6)",
+    )
 
     return parser.parse_args()
 
@@ -232,6 +327,7 @@ def parse_args():
 # =====================================================================
 # MAIN PIPELINE
 # =====================================================================
+
 
 def main():
     args = parse_args()
@@ -252,8 +348,8 @@ def main():
     src_tag = "_".join(sorted(args.source_markets))
     ckpt_prefix = f"{src_tag}_to_{args.target_market}_{args.category}"
     backbone_ckpt = f"backbone_{ckpt_prefix}"
-    teacher_ckpt  = f"teacher_{ckpt_prefix}"
-    student_ckpt  = f"student_prompts_{ckpt_prefix}"
+    teacher_ckpt = f"teacher_{ckpt_prefix}"
+    student_ckpt = f"student_prompts_{ckpt_prefix}"
 
     pipeline_start = time.time()
 
@@ -266,8 +362,7 @@ def main():
 
     t0 = time.time()
     data = load_all_markets(
-        args.data_dir, args.source_markets, args.target_market,
-        category=args.category
+        args.data_dir, args.source_markets, args.target_market, category=args.category
     )
     print(f"  Data loading done in {format_duration(time.time() - t0)}")
 
@@ -285,9 +380,9 @@ def main():
     print("STEP 2:  Pre-training LightGCN on combined graph")
     print("=" * 60)
 
-    backbone = LightGCN(n_users, n_items,
-                        embed_dim=args.embed_dim,
-                        n_layers=args.n_layers)
+    backbone = LightGCN(
+        n_users, n_items, embed_dim=args.embed_dim, n_layers=args.n_layers
+    )
 
     # Check for existing checkpoint
     if not args.force_retrain and load_checkpoint(
@@ -329,6 +424,7 @@ def main():
     print("=" * 60)
 
     import copy
+
     teacher = copy.deepcopy(backbone)  # start from pre-trained backbone weights
 
     # Check for existing checkpoint
@@ -361,17 +457,22 @@ def main():
 
     # Evaluate Teacher Performance
     from evaluate import evaluate_model_both
+
     print("\n  Evaluating Teacher (Upper Bound)...")
     teacher_metrics = evaluate_model_both(
-        teacher, data["target_adj_train"].to(device),
-        data["target_test"], n_items,
+        teacher,
+        data["target_adj_train"].to(device),
+        data["target_test"],
+        n_items,
         args.k_list,
         train_interactions=data["target_train_interactions"],
         val_dict=data["target_val"],
         prompt_module=None,
         device=device,
     )
-    print(f"  Teacher Test NDCG@{min(args.k_list)} (Sampled): {teacher_metrics.get(f'sampled/NDCG@{min(args.k_list)}', 0.0):.4f}")
+    print(
+        f"  Teacher Test NDCG@{min(args.k_list)} (Sampled): {teacher_metrics.get(f'sampled/NDCG@{min(args.k_list)}', 0.0):.4f}"
+    )
 
     # ==================================================================
     # STEP 4:  TRAIN THE STUDENT  (prompts only, backbone frozen)
@@ -402,9 +503,12 @@ def main():
         prompt_module = prompt_module.to(device)
         # Still run evaluation even if loaded from checkpoint
         from evaluate import evaluate_model_both
+
         final_metrics = evaluate_model_both(
-            backbone, data["target_adj_train"].to(device),
-            data["target_test"], n_items,
+            backbone,
+            data["target_adj_train"].to(device),
+            data["target_test"],
+            n_items,
             args.k_list,
             train_interactions=data["target_train_interactions"],
             val_dict=data["target_val"],
@@ -427,6 +531,10 @@ def main():
             wrd_lambda=args.wrd_lambda,
             wrd_mu=args.wrd_mu,
             amrdd_temperature=args.amrdd_temp,
+            delta=args.delta,
+            epsilon=args.epsilon,
+            distill_temp=args.distill_temp,
+            distill_K=args.distill_K,
             lr=args.student_lr,
             device=device,
         )
@@ -458,8 +566,10 @@ def main():
         # ---- Baseline: backbone WITHOUT prompts ----
         print("\n  Evaluating baseline (backbone only, no prompts)...")
         baseline_metrics = evaluate_model_both(
-            backbone, data["target_adj_train"].to(device),
-            data["target_test"], n_items,
+            backbone,
+            data["target_adj_train"].to(device),
+            data["target_test"],
+            n_items,
             args.k_list,
             train_interactions=data["target_train_interactions"],
             val_dict=data["target_val"],
@@ -470,8 +580,10 @@ def main():
         # ---- Re-evaluate with val masking for fair comparison ----
         print("  Evaluating DCMPT (backbone + prompts)...")
         final_metrics = evaluate_model_both(
-            backbone, data["target_adj_train"].to(device),
-            data["target_test"], n_items,
+            backbone,
+            data["target_adj_train"].to(device),
+            data["target_test"],
+            n_items,
             args.k_list,
             train_interactions=data["target_train_interactions"],
             val_dict=data["target_val"],
@@ -480,10 +592,18 @@ def main():
         )
 
         # ---- Print results ----
-        paper_de = {"Recall@10": 0.5365, "Recall@20": None,
-                    "NDCG@10": 0.3898, "NDCG@20": None}
-        paper_base_de = {"Recall@10": 0.1958, "Recall@20": None,
-                         "NDCG@10": 0.1389, "NDCG@20": None}
+        paper_de = {
+            "Recall@10": 0.5365,
+            "Recall@20": None,
+            "NDCG@10": 0.3898,
+            "NDCG@20": None,
+        }
+        paper_base_de = {
+            "Recall@10": 0.1958,
+            "Recall@20": None,
+            "NDCG@10": 0.1389,
+            "NDCG@20": None,
+        }
 
         for protocol in ["sampled", "full"]:
             print("\n" + "=" * 60)
@@ -493,7 +613,9 @@ def main():
                 print("FINAL EVALUATION RESULTS (Full Ranking)")
             print("=" * 60)
 
-            print(f"\n  {'Metric':<15} {'Baseline':>10} {'DCMPT':>10} {'Delta':>10} {'Paper':>10} {'PaperBase':>10}")
+            print(
+                f"\n  {'Metric':<15} {'Baseline':>10} {'DCMPT':>10} {'Delta':>10} {'Paper':>10} {'PaperBase':>10}"
+            )
             print(f"  {'-'*65}")
 
             for metric in ["NDCG@10", "Recall@10", "NDCG@20", "Recall@20"]:
@@ -502,31 +624,38 @@ def main():
                 dcmpt_val = final_metrics.get(key, 0.0)
                 if base_val == 0.0 and dcmpt_val == 0.0:
                     continue
-                
+
                 delta = dcmpt_val - base_val
                 delta_str = f"+{delta:.4f}" if delta >= 0 else f"{delta:.4f}"
-                
+
                 if protocol == "sampled":
                     paper_val = paper_de.get(metric)
                     paper_str = f"{paper_val:.4f}" if paper_val else "---"
                     paper_base_val = paper_base_de.get(metric)
-                    paper_base_str = f"{paper_base_val:.4f}" if paper_base_val else "---"
+                    paper_base_str = (
+                        f"{paper_base_val:.4f}" if paper_base_val else "---"
+                    )
                 else:
                     paper_str = "---"
                     paper_base_str = "---"
-                    
-                print(f"  {metric:<15} {base_val:>10.4f} {dcmpt_val:>10.4f} "
-                      f"{delta_str:>10} {paper_str:>10} {paper_base_str:>10}")
+
+                print(
+                    f"  {metric:<15} {base_val:>10.4f} {dcmpt_val:>10.4f} "
+                    f"{delta_str:>10} {paper_str:>10} {paper_base_str:>10}"
+                )
 
             base_ndcg = baseline_metrics.get(f"{protocol}/NDCG@{min(args.k_list)}", 0)
             dcmpt_ndcg = final_metrics.get(f"{protocol}/NDCG@{min(args.k_list)}", 0)
             if base_ndcg > 0:
                 improvement = (dcmpt_ndcg - base_ndcg) / base_ndcg * 100
-                print(f"\n  Prompt contribution: NDCG@{min(args.k_list)} "
-                      f"+{improvement:.1f}% over baseline")
+                print(
+                    f"\n  Prompt contribution: NDCG@{min(args.k_list)} "
+                    f"+{improvement:.1f}% over baseline"
+                )
 
         # ---- Results saving ----
         from datetime import datetime
+
         results_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "results"
         )
@@ -536,7 +665,7 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_file = os.path.join(
             results_dir,
-            f"run_{src_tag}_to_{args.target_market}_{args.category}_{timestamp}.json"
+            f"run_{src_tag}_to_{args.target_market}_{args.category}_{timestamp}.json",
         )
 
         result_data = {
@@ -551,6 +680,10 @@ def main():
                 "alpha": args.alpha,
                 "beta": args.beta,
                 "gamma": args.gamma,
+                "delta": args.delta,
+                "epsilon": args.epsilon,
+                "distill_temp": args.distill_temp,
+                "distill_K": args.distill_K,
                 "student_lr": args.student_lr,
                 "student_batch": args.student_batch,
                 "student_epochs": args.student_epochs,

@@ -42,7 +42,8 @@ from collections import defaultdict
 # Local modules
 from lightgcn import LightGCN
 from prompt import PromptModule
-from losses import bpr_loss, wrd_loss, amrdd_loss, amrdd_loss_multi_market, total_loss
+from losses import (bpr_loss, wrd_loss, amrdd_loss, amrdd_loss_multi_market,
+                    total_loss, score_distill_loss, listwise_distill_loss)
 from evaluate import evaluate_model
 from data_utils import build_bpr_triplets
 
@@ -346,6 +347,10 @@ class StudentTrainer:
                  wrd_lambda: float = 1.0,
                  wrd_mu: float = 1.0,
                  amrdd_temperature: float = 1.0,
+                 delta: float = 1.0,
+                 epsilon: float = 0.5,
+                 distill_temp: float = 5.0,
+                 distill_K: int = 100,
                  lr: float = 1e-3,
                  device: str = "cpu"):
 
@@ -380,6 +385,10 @@ class StudentTrainer:
         self.wrd_lambda = wrd_lambda
         self.wrd_mu = wrd_mu
         self.amrdd_temperature = amrdd_temperature
+        self.delta = delta
+        self.epsilon = epsilon
+        self.distill_temp = distill_temp
+        self.distill_K = distill_K
 
         # Optimiser over prompt parameters ONLY
         self.optimizer = optim.Adam(
@@ -553,13 +562,37 @@ class StudentTrainer:
                 )
 
             # ----------------------------------------------------------
+            # Direct Score Distillation (MSE on teacher's top-K items)
+            # ----------------------------------------------------------
+            l_score = score_distill_loss(
+                student_scores, teacher_scores,
+                K=self.distill_K
+            )
+
+            # ----------------------------------------------------------
+            # Listwise Distillation (KL over full ranking distribution)
+            # ----------------------------------------------------------
+            l_listwise = listwise_distill_loss(
+                student_scores, teacher_scores,
+                temperature=self.distill_temp
+            )
+
+            # ----------------------------------------------------------
             # Combine & Backprop (Prompt parameters only)
             # ----------------------------------------------------------
             loss = total_loss(l_bpr, l_wrd, l_amrdd,
-                              self.alpha, self.beta, self.gamma)
+                              self.alpha, self.beta, self.gamma,
+                              l_score_distill=l_score,
+                              l_listwise=l_listwise,
+                              delta=self.delta,
+                              epsilon=self.epsilon)
 
             self.optimizer.zero_grad()
             loss.backward()
+            # Gradient clipping for stability with stronger loss signals
+            torch.nn.utils.clip_grad_norm_(
+                self.prompt_module.parameters(), max_norm=1.0
+            )
             self.optimizer.step()
 
             total_loss_val += loss.item()
@@ -594,21 +627,29 @@ class StudentTrainer:
         if k_list is None:
             k_list = [10, 20]
 
+        # Cosine annealing for better convergence
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=n_epochs, eta_min=1e-6
+        )
+
         best_metrics = None
         best_ndcg = -1.0
         best_epoch = 0
         best_prompt_state = None
         patience_counter = 0
-        patience = 10  # stop if no improvement for 10 epochs (paper value)
+        patience = 20  # eval cycles without improvement before stopping
 
         for epoch in range(1, n_epochs + 1):
             t0 = time.time()
             avg_loss = self.train_epoch(batch_size)
             epoch_time = time.time() - t0
 
+            scheduler.step()
+
+            current_lr = self.optimizer.param_groups[0]['lr']
             if verbose and (epoch % 10 == 0 or epoch == 1):
                 print(f"  [Student]  Epoch {epoch:3d}/{n_epochs}  "
-                      f"Loss: {avg_loss:.4f}  "
+                      f"Loss: {avg_loss:.4f}  LR: {current_lr:.6f}  "
                       f"({epoch_time:.1f}s/epoch)")
 
             # Periodic validation with early stopping
@@ -644,14 +685,13 @@ class StudentTrainer:
                     )
                     print(f"    [Val] {metrics_str}{marker}")
 
-                # Early stopping (paper: patience = 10)
-                # DISABLED as per user request
-                # if patience_counter >= patience:
-                #     if verbose:
-                #         print(f"  ⚡ Early stopping at epoch {epoch} "
-                #               f"(best was epoch {best_epoch}, "
-                #               f"{ndcg_key}={best_ndcg:.4f})")
-                #     break
+                # Early stopping
+                if patience_counter >= patience:
+                    if verbose:
+                        print(f"  ⚡ Early stopping at epoch {epoch} "
+                              f"(best was epoch {best_epoch}, "
+                              f"{ndcg_key}={best_ndcg:.4f})")
+                    break
 
         # Restore best prompt weights
         if best_prompt_state is not None:

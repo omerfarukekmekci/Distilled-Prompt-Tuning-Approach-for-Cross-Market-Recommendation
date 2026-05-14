@@ -366,39 +366,115 @@ def amrdd_loss_multi_market(batch_student_user: torch.Tensor,
 
 
 
+# =========================================================================
+# 4.  DIRECT SCORE DISTILLATION  (Top-K Score MSE)
+# =========================================================================
+
+def score_distill_loss(student_scores: torch.Tensor,
+                       teacher_scores: torch.Tensor,
+                       K: int = 100) -> torch.Tensor:
+    """
+    Directly minimize MSE between student and teacher scores for the
+    teacher's top-K ranked items.
+
+    This is a much stronger signal than WRD's log-sigmoid formulation,
+    because it penalizes both *direction* and *magnitude* of score
+    discrepancies.
+
+    Parameters
+    ----------
+    student_scores : Tensor (batch_users, n_items)
+    teacher_scores : Tensor (batch_users, n_items)
+    K : int
+        Number of top teacher-ranked items to match.
+
+    Returns
+    -------
+    loss : scalar Tensor
+    """
+    batch_size, n_items = student_scores.shape
+    K = min(K, n_items)
+
+    # Get teacher's top-K items
+    _, topk_indices = teacher_scores.topk(K, dim=1)
+
+    # Gather both student and teacher scores for these items
+    s_topk = student_scores.gather(1, topk_indices)
+    t_topk = teacher_scores.gather(1, topk_indices).detach()
+
+    return F.mse_loss(s_topk, t_topk)
+
 
 # =========================================================================
-# 4.  TOTAL LOSS
+# 5.  LISTWISE DISTILLATION  (Full-Ranking KL Divergence)
+# =========================================================================
+
+def listwise_distill_loss(student_scores: torch.Tensor,
+                          teacher_scores: torch.Tensor,
+                          temperature: float = 5.0) -> torch.Tensor:
+    """
+    KL divergence between softmax distributions over ALL items.
+
+    This teaches the student the teacher's complete ranking distribution,
+    not just top-K fragments.  The temperature parameter softens the
+    teacher's distribution so that lower-ranked items also contribute
+    gradient signal (standard knowledge distillation technique).
+
+    Parameters
+    ----------
+    student_scores : Tensor (batch_users, n_items)
+    teacher_scores : Tensor (batch_users, n_items)
+    temperature : float
+        Higher = softer distribution = more signal from lower-ranked items.
+        Typical: 1.0–10.0.  We use 5.0 as default.
+
+    Returns
+    -------
+    loss : scalar Tensor
+    """
+    t_dist = F.softmax(teacher_scores.detach() / temperature, dim=1)
+    s_log_dist = F.log_softmax(student_scores / temperature, dim=1)
+
+    # Multiply by T^2 to keep gradient magnitudes consistent across
+    # different temperature values (Hinton et al. 2015).
+    return F.kl_div(s_log_dist, t_dist, reduction='batchmean') * (temperature ** 2)
+
+
+# =========================================================================
+# 6.  TOTAL LOSS
 # =========================================================================
 
 def total_loss(l_bpr: torch.Tensor, l_wrd: torch.Tensor,
                l_amrdd: torch.Tensor,
                alpha: float = 1.0, beta: float = 0.5,
-               gamma: float = 0.5) -> torch.Tensor:
+               gamma: float = 0.5,
+               l_score_distill: torch.Tensor = None,
+               l_listwise: torch.Tensor = None,
+               delta: float = 1.0,
+               epsilon: float = 0.5) -> torch.Tensor:
     """
-    Combine the three loss components with hyperparameter weights.
+    Combine all loss components with hyperparameter weights.
 
-        L_total = α · L_BPR  +  β · L_WRD  +  γ · L_AMRDD
+        L_total = α·BPR + β·WRD + γ·AMRDD + δ·ScoreDistill + ε·Listwise
 
     Parameters
     ----------
-    l_bpr   : scalar Tensor
-    l_wrd   : scalar Tensor
-    l_amrdd : scalar Tensor
-    alpha, beta, gamma : float
-        Balancing hyperparameters.  Typical starting values:
-        α = 1.0, β = 0.5, γ = 0.5  (from paper defaults).
+    l_bpr, l_wrd, l_amrdd : scalar Tensor
+        Original DCMPT loss components.
+    l_score_distill : scalar Tensor, optional
+        Direct top-K score MSE distillation.
+    l_listwise : scalar Tensor, optional
+        Full-ranking listwise KL distillation.
+    alpha, beta, gamma, delta, epsilon : float
+        Balancing hyperparameters.
 
     Returns
     -------
     loss : scalar Tensor
-
-    Tuning guidance
-    ---------------
-    •  α (BPR) grounds the model in real target-market labels.
-    •  β (WRD) controls how much global ranking knowledge flows from
-       the teacher.  Set higher if the teacher is strong and trustworthy.
-    •  γ (AMRDD) controls fine-grained distributional alignment.  Set
-       higher when target market has distinctive preferences.
     """
-    return alpha * l_bpr + beta * l_wrd + gamma * l_amrdd
+    loss = alpha * l_bpr + beta * l_wrd + gamma * l_amrdd
+    if l_score_distill is not None:
+        loss = loss + delta * l_score_distill
+    if l_listwise is not None:
+        loss = loss + epsilon * l_listwise
+    return loss

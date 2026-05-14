@@ -111,6 +111,11 @@ class PromptModule(nn.Module):
             torch.randn(n_prompts, embed_dim) * 0.1
         )
 
+        # Learnable scaling factor for prompt magnitude.
+        # Lets the model control how aggressively prompts modify
+        # the frozen backbone embeddings.
+        self.prompt_scale = nn.Parameter(torch.ones(1))
+
     # ------------------------------------------------------------------
     # INTERNAL:  compute attention-weighted prompt for one entity type
     # ------------------------------------------------------------------
@@ -140,6 +145,9 @@ class PromptModule(nn.Module):
         # Weighted sum of prompt vectors:
         #   (batch, n_prompts) × (n_prompts, dim) = (batch, dim)
         prompt_vectors = attn_weights @ prompt_bank
+
+        # Apply learnable scale
+        prompt_vectors = prompt_vectors * self.prompt_scale
 
         return prompt_vectors
 
